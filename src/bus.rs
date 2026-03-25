@@ -49,7 +49,23 @@ impl BusState {
                 }
             }
         } else {
-            eprintln!("[bus] unknown target format: {}", target);
+            // Subscription-based routing for reply:* and other custom targets.
+            // Match clients whose subscriptions match the target (supports glob with *).
+            let mut delivered = false;
+            for client in self.clients.values() {
+                if client.name != msg.source {
+                    for sub in &client.subscriptions {
+                        if sub == target || (sub.ends_with('*') && target.starts_with(&sub[..sub.len()-1])) {
+                            let _ = client.tx.send(msg.clone());
+                            delivered = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !delivered {
+                eprintln!("[bus] no subscriber for target: {}", target);
+            }
         }
     }
 }
