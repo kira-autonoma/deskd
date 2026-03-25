@@ -63,6 +63,14 @@ pub async fn serve(socket_path: &str) -> Result<()> {
     }
 
     let listener = UnixListener::bind(path).context("Failed to bind Unix socket")?;
+
+    // Make socket world-accessible so container users (non-root) can connect
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o777))?;
+    }
+
     eprintln!("[bus] listening on {}", socket_path);
 
     let state = Arc::new(RwLock::new(BusState::new()));
