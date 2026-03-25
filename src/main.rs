@@ -2,8 +2,11 @@ mod agent;
 mod bus;
 mod config;
 mod message;
+mod worker;
 
 use clap::{Parser, Subcommand};
+
+const DEFAULT_SOCKET: &str = "/tmp/deskd.sock";
 
 #[derive(Parser)]
 #[command(name = "deskd", about = "Agent orchestration runtime")]
@@ -22,7 +25,7 @@ enum Commands {
     /// Start the message bus server
     Serve {
         /// Unix socket path
-        #[arg(long, default_value = "/tmp/deskd.sock")]
+        #[arg(long, default_value = DEFAULT_SOCKET)]
         socket: String,
     },
 }
@@ -55,6 +58,17 @@ enum AgentAction {
         /// Max turns for this task
         #[arg(long)]
         max_turns: Option<u32>,
+        /// Bus socket path
+        #[arg(long, default_value = DEFAULT_SOCKET)]
+        socket: String,
+    },
+    /// Run agent worker loop (connects to bus, processes tasks)
+    Run {
+        /// Agent name
+        name: String,
+        /// Bus socket path
+        #[arg(long, default_value = DEFAULT_SOCKET)]
+        socket: String,
     },
     /// List all agents
     List,
@@ -97,9 +111,30 @@ async fn main() -> anyhow::Result<()> {
                 name,
                 message,
                 max_turns,
+                socket,
             } => {
-                let response = agent::send(&name, &message, max_turns).await?;
-                println!("{}", response);
+                // If bus socket exists, route through bus; otherwise direct
+                if std::path::Path::new(&socket).exists() {
+                    let target = format!("agent:{}", name);
+                    worker::send_via_bus(&socket, "cli", &target, &message, max_turns).await?;
+                } else {
+                    let response = agent::send(&name, &message, max_turns).await?;
+                    println!("{}", response);
+                }
+            }
+            AgentAction::Run { name, socket } => {
+                // Verify agent exists
+                agent::load_state(&name)?;
+
+                eprintln!("[deskd] starting worker for agent '{}'", name);
+                tokio::select! {
+                    result = worker::run(&name, &socket) => {
+                        result?;
+                    }
+                    _ = tokio::signal::ctrl_c() => {
+                        eprintln!("\n[deskd] shutting down agent '{}'", name);
+                    }
+                }
             }
             AgentAction::List => {
                 let agents = agent::list().await?;
