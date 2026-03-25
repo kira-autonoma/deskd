@@ -167,6 +167,7 @@ async fn handle_connection(stream: UnixStream, state: Arc<RwLock<BusState>>) -> 
 
         match envelope {
             Envelope::Message(msg) => {
+                eprintln!("[bus] routing message from {} to {}", msg.source, msg.target);
                 let bus = state.read().await;
                 bus.route(&msg);
             }

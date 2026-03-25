@@ -109,7 +109,10 @@ pub async fn run(name: &str, socket_path: &str) -> Result<()> {
                 reply_line.push('\n');
 
                 let mut w = writer.lock().await;
-                w.write_all(reply_line.as_bytes()).await.ok();
+                match w.write_all(reply_line.as_bytes()).await {
+                    Ok(_) => eprintln!("[worker] reply sent to bus: target={}", target),
+                    Err(e) => eprintln!("[worker] failed to write reply to bus: {}", e),
+                }
             }
             Err(e) => {
                 eprintln!("[worker] task failed: {}", e);
