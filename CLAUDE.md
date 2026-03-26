@@ -140,11 +140,38 @@ cargo build --release --target x86_64-unknown-linux-musl
 codesign --force --sign - target/release/deskd
 ```
 
-Releases are built by GitHub Actions on tag push (`v*`). Download from GitHub Releases.
+## Install
+
+```bash
+# From GitHub Releases (prebuilt binary)
+curl -fsSL https://raw.githubusercontent.com/kgatilin/deskd/main/install.sh | bash
+```
+
+## Before Pushing
+
+All three must pass — CI will reject otherwise:
+
+```bash
+cargo fmt --check    # formatting (auto-fix: cargo fmt)
+cargo clippy -- -D warnings   # linter/static analysis
+cargo test           # unit tests
+```
+
+Quick one-liner:
+```bash
+cargo fmt && cargo clippy -- -D warnings && cargo test
+```
+
+## CI/CD
+
+- **CI** (push/PR to main): `cargo fmt --check` + `cargo clippy -D warnings` + `cargo test`
+- **Release** (tag `v*`): quality gate → build binaries (Linux amd64, macOS amd64/arm64) → GitHub Release
+
+Releases are built by GitHub Actions on tag push. Download from GitHub Releases.
 
 ## Conventions
 
 - Merge directly to main (squash merge, no PRs for owner repos)
 - Commit messages: `description (#issue)` or `description`
-- `cargo test` must pass before merge
+- All quality gates must pass before merge
 - RUST_LOG=debug for verbose logging to stderr
