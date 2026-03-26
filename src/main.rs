@@ -40,6 +40,12 @@ enum Commands {
         #[command(subcommand)]
         action: AgentAction,
     },
+    /// Show live status of all agents defined in workspace config.
+    Status {
+        /// Path to workspace.yaml.
+        #[arg(long)]
+        config: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -320,6 +326,39 @@ async fn main() -> anyhow::Result<()> {
                 println!("{}", response);
             }
         },
+        Commands::Status {
+            config: config_path,
+        } => {
+            let workspace = config::WorkspaceConfig::load(&config_path)?;
+            println!(
+                "{:<12} {:<9} {:<6} {:<10} CURRENT TASK",
+                "NAME", "STATUS", "TURNS", "COST"
+            );
+            println!("{}", "─".repeat(70));
+            for def in &workspace.agents {
+                let bus_socket = def.bus_socket();
+                let online = std::path::Path::new(&bus_socket).exists();
+                let state = agent::load_state(&def.name).ok();
+                let (status, turns, cost, current_task) = match &state {
+                    Some(s) if online => (
+                        s.status.as_str(),
+                        s.total_turns,
+                        s.total_cost,
+                        if s.current_task.is_empty() {
+                            "-".to_string()
+                        } else {
+                            truncate_main(&s.current_task, 40)
+                        },
+                    ),
+                    Some(s) => ("offline", s.total_turns, s.total_cost, "-".to_string()),
+                    None => ("offline", 0, 0.0, "-".to_string()),
+                };
+                println!(
+                    "{:<12} {:<9} {:<6} ${:<9.4} {}",
+                    def.name, status, turns, cost, current_task
+                );
+            }
+        }
     }
 
     Ok(())

@@ -46,6 +46,16 @@ pub struct AgentState {
     pub total_turns: u32,
     pub total_cost: f64,
     pub created_at: String,
+    /// "idle" or "working"
+    #[serde(default = "default_status")]
+    pub status: String,
+    /// Truncated text of the task currently being processed.
+    #[serde(default)]
+    pub current_task: String,
+}
+
+fn default_status() -> String {
+    "idle".to_string()
 }
 
 fn state_path(name: &str) -> PathBuf {
@@ -71,7 +81,7 @@ fn save_state(state: &AgentState) -> Result<()> {
     Ok(())
 }
 
-pub fn _save_state_pub(state: &AgentState) -> Result<()> {
+pub fn save_state_pub(state: &AgentState) -> Result<()> {
     save_state(state)
 }
 
@@ -88,6 +98,8 @@ pub async fn create(cfg: &AgentConfig) -> Result<AgentState> {
         total_turns: 0,
         total_cost: 0.0,
         created_at: Utc::now().to_rfc3339(),
+        status: "idle".to_string(),
+        current_task: String::new(),
     };
 
     save_state(&state)?;
@@ -143,6 +155,8 @@ pub async fn create_or_recover(
         total_turns: 0,
         total_cost: 0.0,
         created_at: Utc::now().to_rfc3339(),
+        status: "idle".to_string(),
+        current_task: String::new(),
     };
     save_state(&state)?;
     info!(agent = %def.name, "agent created");
@@ -475,6 +489,8 @@ created_at: "2024-01-01T00:00:00Z"
             total_turns: 5,
             total_cost: 0.42,
             created_at: Utc::now().to_rfc3339(),
+            status: "idle".to_string(),
+            current_task: String::new(),
         };
         let yaml = serde_yaml::to_string(&state).unwrap();
         let restored: AgentState = serde_yaml::from_str(&yaml).unwrap();

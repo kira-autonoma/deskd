@@ -117,6 +117,13 @@ pub async fn run(name: &str, socket_path: &str, bus_socket: Option<String>) -> R
 
         info!(agent = %name, source = %msg.source, task = %truncate(task, 80), "processing task");
 
+        // Mark agent as working so `deskd status` can report live state.
+        if let Ok(mut st) = agent::load_state(name) {
+            st.status = "working".to_string();
+            st.current_task = truncate(task, 80).to_string();
+            let _ = agent::save_state_pub(&st);
+        }
+
         let max_turns = msg
             .payload
             .get("max_turns")
@@ -174,6 +181,7 @@ pub async fn run(name: &str, socket_path: &str, bus_socket: Option<String>) -> R
             )
             .await;
 
+            set_idle(name);
             if let Err(e) = result {
                 warn!(agent = %name, error = %e, "task failed");
                 write_inbox(name, &msg, task, None, Some(format!("{}", e)));
@@ -191,6 +199,7 @@ pub async fn run(name: &str, socket_path: &str, bus_socket: Option<String>) -> R
             // Non-Telegram: send full response after completion
             match agent::send(name, task, max_turns, bus_socket.as_deref()).await {
                 Ok(response) => {
+                    set_idle(name);
                     info!(agent = %name, "task completed, posting result");
 
                     // Write to file-based inbox for async reading.
@@ -229,6 +238,7 @@ pub async fn run(name: &str, socket_path: &str, bus_socket: Option<String>) -> R
                     }
                 }
                 Err(e) => {
+                    set_idle(name);
                     warn!(agent = %name, error = %e, "task failed");
 
                     // Write error to inbox.
@@ -258,6 +268,15 @@ pub async fn run(name: &str, socket_path: &str, bus_socket: Option<String>) -> R
 
     info!(agent = %name, "disconnected from bus");
     Ok(())
+}
+
+/// Mark agent as idle in its state file.
+fn set_idle(name: &str) {
+    if let Ok(mut st) = agent::load_state(name) {
+        st.status = "idle".to_string();
+        st.current_task = String::new();
+        let _ = agent::save_state_pub(&st);
+    }
 }
 
 /// Send a message via the bus (connect, send, wait for one reply, disconnect).
