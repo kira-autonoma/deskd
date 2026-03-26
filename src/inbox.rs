@@ -38,7 +38,8 @@ pub fn write(agent: &str, entry: &InboxEntry) -> Result<()> {
     );
     let path = dir.join(&filename);
     let json = serde_json::to_string_pretty(entry)?;
-    std::fs::write(&path, json).with_context(|| format!("failed to write inbox entry: {}", path.display()))?;
+    std::fs::write(&path, json)
+        .with_context(|| format!("failed to write inbox entry: {}", path.display()))?;
     tracing::info!(agent = %agent, path = %path.display(), "wrote inbox entry");
     Ok(())
 }

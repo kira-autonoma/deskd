@@ -27,7 +27,12 @@ enum OutboundCmd {
 /// Run the Telegram adapter for a specific agent.
 /// `agent_name` is used to name the bus registration and for logging.
 /// `mention_only_chats` is a set of chat_ids where only @mentions trigger the agent.
-pub async fn run(token: String, socket_path: String, agent_name: String, mention_only_chats: Vec<i64>) -> Result<()> {
+pub async fn run(
+    token: String,
+    socket_path: String,
+    agent_name: String,
+    mention_only_chats: Vec<i64>,
+) -> Result<()> {
     info!(agent = %agent_name, "starting Telegram adapter");
 
     let bot = Bot::new(token);
@@ -91,9 +96,12 @@ async fn bus_loop(
     adapter_name: &str,
     outbound_tx: mpsc::UnboundedSender<OutboundCmd>,
 ) -> Result<()> {
-    let mut stream = UnixStream::connect(socket_path)
-        .await
-        .with_context(|| format!("telegram adapter: failed to connect to bus at {}", socket_path))?;
+    let mut stream = UnixStream::connect(socket_path).await.with_context(|| {
+        format!(
+            "telegram adapter: failed to connect to bus at {}",
+            socket_path
+        )
+    })?;
 
     let reg = serde_json::json!({
         "type": "register",
@@ -136,12 +144,22 @@ async fn bus_loop(
 
             let text = msg
                 .get("payload")
-                .and_then(|p| p.get("result").or_else(|| p.get("task")).or_else(|| p.get("error")))
+                .and_then(|p| {
+                    p.get("result")
+                        .or_else(|| p.get("task"))
+                        .or_else(|| p.get("error"))
+                })
                 .and_then(|t| t.as_str())
                 .unwrap_or("(no content)");
 
             debug!(chat_id = chat_id, "forwarding bus message to Telegram");
-            if outbound_tx.send(OutboundCmd::Text { chat_id, text: text.to_string() }).is_err() {
+            if outbound_tx
+                .send(OutboundCmd::Text {
+                    chat_id,
+                    text: text.to_string(),
+                })
+                .is_err()
+            {
                 warn!("telegram adapter: outbound channel closed");
                 break;
             }
@@ -162,7 +180,11 @@ async fn bus_loop(
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
 
-            let cmd = if typing { OutboundCmd::TypingStart(chat_id) } else { OutboundCmd::TypingStop(chat_id) };
+            let cmd = if typing {
+                OutboundCmd::TypingStart(chat_id)
+            } else {
+                OutboundCmd::TypingStop(chat_id)
+            };
             if outbound_tx.send(cmd).is_err() {
                 warn!("telegram adapter: outbound channel closed");
                 break;
@@ -209,10 +231,10 @@ async fn outbound_sender(bot: Bot, mut rx: mpsc::UnboundedReceiver<OutboundCmd>)
                     .parse_mode(ParseMode::Html)
                     .await;
 
-                if result.is_err() {
-                    if let Err(e) = bot.send_message(chat, &text).await {
-                        warn!(chat_id = chat_id, error = %e, "failed to send Telegram message");
-                    }
+                if result.is_err()
+                    && let Err(e) = bot.send_message(chat, &text).await
+                {
+                    warn!(chat_id = chat_id, error = %e, "failed to send Telegram message");
                 }
 
                 // Restart typing loop — more streaming chunks may still be coming.
@@ -250,11 +272,11 @@ async fn polling_loop(
         let mention_only = mention_only_chats.clone();
         async move {
             // Skip messages from the bot itself to prevent reply loops.
-            if msg.from().map(|u| u.username.as_deref() == Some(&bot_user)).unwrap_or(false) {
+            if msg.from.as_ref().map(|u| u.username.as_deref() == Some(&bot_user)).unwrap_or(false) {
                 return Ok(());
             }
             // Skip messages from other bots.
-            if msg.from().map(|u| u.is_bot).unwrap_or(false) {
+            if msg.from.as_ref().map(|u| u.is_bot).unwrap_or(false) {
                 return Ok(());
             }
 
@@ -504,7 +526,11 @@ mod tests {
     #[test]
     fn test_chat_id_negative() {
         let target = "telegram.out:-1001234567890";
-        let id: i64 = target.strip_prefix("telegram.out:").unwrap().parse().unwrap();
+        let id: i64 = target
+            .strip_prefix("telegram.out:")
+            .unwrap()
+            .parse()
+            .unwrap();
         assert_eq!(id, -1001234567890i64);
     }
 }

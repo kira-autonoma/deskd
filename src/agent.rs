@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -58,8 +58,8 @@ fn log_path(name: &str) -> PathBuf {
 
 pub fn load_state(name: &str) -> Result<AgentState> {
     let path = state_path(name);
-    let content = std::fs::read_to_string(&path)
-        .with_context(|| format!("Agent '{}' not found", name))?;
+    let content =
+        std::fs::read_to_string(&path).with_context(|| format!("Agent '{}' not found", name))?;
     let state: AgentState = serde_yaml::from_str(&content)?;
     Ok(state)
 }
@@ -71,7 +71,7 @@ fn save_state(state: &AgentState) -> Result<()> {
     Ok(())
 }
 
-pub fn save_state_pub(state: &AgentState) -> Result<()> {
+pub fn _save_state_pub(state: &AgentState) -> Result<()> {
     save_state(state)
 }
 
@@ -153,7 +153,12 @@ pub async fn create_or_recover(
 ///
 /// `bus_socket`: path to the agent's bus (injected as DESKD_BUS_SOCKET).
 /// Claude uses this to call the `send_message` MCP tool.
-pub async fn send(name: &str, message: &str, max_turns: Option<u32>, bus_socket: Option<&str>) -> Result<String> {
+pub async fn send(
+    name: &str,
+    message: &str,
+    max_turns: Option<u32>,
+    bus_socket: Option<&str>,
+) -> Result<String> {
     send_inner(name, message, max_turns, bus_socket, None).await
 }
 
@@ -209,10 +214,8 @@ async fn send_inner(
         .unwrap_or_else(|| config::agent_bus_socket(&state.config.work_dir));
 
     let config_path_str = state.config.config_path.clone().unwrap_or_default();
-    let mut extra_env: Vec<(&str, &str)> = vec![
-        ("DESKD_AGENT_NAME", name),
-        ("DESKD_BUS_SOCKET", &bus_path),
-    ];
+    let mut extra_env: Vec<(&str, &str)> =
+        vec![("DESKD_AGENT_NAME", name), ("DESKD_BUS_SOCKET", &bus_path)];
     if !config_path_str.is_empty() {
         extra_env.push(("DESKD_AGENT_CONFIG", &config_path_str));
     }
@@ -248,10 +251,10 @@ async fn send_inner(
                         .and_then(|c| c.as_array())
                     {
                         for block in blocks {
-                            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                                    block_text.push_str(text);
-                                }
+                            if block.get("type").and_then(|t| t.as_str()) == Some("text")
+                                && let Some(text) = block.get("text").and_then(|t| t.as_str())
+                            {
+                                block_text.push_str(text);
                             }
                         }
                     }
@@ -384,12 +387,11 @@ pub async fn list() -> Result<Vec<AgentState>> {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map(|e| e == "yaml").unwrap_or(false) {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    if let Ok(state) = serde_yaml::from_str::<AgentState>(&content) {
-                        agents.push(state);
-                    }
-                }
+            if path.extension().map(|e| e == "yaml").unwrap_or(false)
+                && let Ok(content) = std::fs::read_to_string(&path)
+                && let Ok(state) = serde_yaml::from_str::<AgentState>(&content)
+            {
+                agents.push(state);
             }
         }
     }
@@ -405,10 +407,10 @@ pub async fn remove(name: &str) -> Result<()> {
     }
     std::fs::remove_file(&path)?;
     let log = log_path(name);
-    if log.exists() {
-        if let Err(e) = std::fs::remove_file(&log) {
-            warn!(agent = %name, error = %e, "failed to remove log file");
-        }
+    if log.exists()
+        && let Err(e) = std::fs::remove_file(&log)
+    {
+        warn!(agent = %name, error = %e, "failed to remove log file");
     }
     info!(agent = %name, "agent removed");
     Ok(())
@@ -464,6 +466,9 @@ created_at: "2024-01-01T00:00:00Z"
         assert_eq!(restored.config.unix_user.as_deref(), Some("agent1"));
         assert_eq!(restored.session_id, "sid-123");
         assert_eq!(restored.total_cost, 0.42);
-        assert_eq!(restored.config.config_path.as_deref(), Some("/home/agent1/deskd.yaml"));
+        assert_eq!(
+            restored.config.config_path.as_deref(),
+            Some("/home/agent1/deskd.yaml")
+        );
     }
 }

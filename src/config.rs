@@ -248,7 +248,10 @@ impl UserConfig {
         // Telegram outbound routes
         if let Some(tg) = &self.telegram {
             for route in &tg.routes {
-                lines.push(format!("  telegram.out:{}  — Telegram chat {}", route.chat_id, route.chat_id));
+                lines.push(format!(
+                    "  telegram.out:{}  — Telegram chat {}",
+                    route.chat_id, route.chat_id
+                ));
             }
         }
 
@@ -360,7 +363,10 @@ agents:
 "#;
         let cfg: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(cfg.agents[0].telegram.is_some());
-        assert_eq!(cfg.agents[0].telegram.as_ref().unwrap().token, "bot-token-123");
+        assert_eq!(
+            cfg.agents[0].telegram.as_ref().unwrap().token,
+            "bot-token-123"
+        );
         assert!(cfg.agents[1].telegram.is_none());
     }
 
@@ -475,7 +481,9 @@ schedules:
                 publish: None,
             }],
             telegram: Some(TelegramRoutesConfig {
-                routes: vec![TelegramRoute { chat_id: -1003733725513 }],
+                routes: vec![TelegramRoute {
+                    chat_id: -1003733725513,
+                }],
             }),
             schedules: vec![],
         };

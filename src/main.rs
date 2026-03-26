@@ -84,9 +84,7 @@ enum AgentAction {
         socket: String,
     },
     /// Show detailed stats for an agent.
-    Stats {
-        name: String,
-    },
+    Stats { name: String },
     /// Read buffered task results from an agent's inbox.
     Read {
         name: String,
@@ -95,9 +93,7 @@ enum AgentAction {
         clear: bool,
     },
     /// Remove an agent (state file + log).
-    Rm {
-        name: String,
-    },
+    Rm { name: String },
     /// Spawn an ephemeral sub-agent, run a task, print result, clean up.
     Spawn {
         name: String,
@@ -127,7 +123,9 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Serve { config: config_path } => {
+        Commands::Serve {
+            config: config_path,
+        } => {
             serve(config_path).await?;
         }
         Commands::Mcp { agent } => {
@@ -135,7 +133,14 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Agent { action } => match action {
             AgentAction::Create {
-                name, prompt, model, workdir, max_turns, unix_user, budget_usd, command,
+                name,
+                prompt,
+                model,
+                workdir,
+                max_turns,
+                unix_user,
+                budget_usd,
+                command,
             } => {
                 let cfg = agent::AgentConfig {
                     name,
@@ -145,20 +150,33 @@ async fn main() -> anyhow::Result<()> {
                     max_turns,
                     unix_user,
                     budget_usd,
-                    command: if command.is_empty() { vec!["claude".to_string()] } else { command },
+                    command: if command.is_empty() {
+                        vec!["claude".to_string()]
+                    } else {
+                        command
+                    },
                     config_path: None,
                 };
                 let state = agent::create(&cfg).await?;
                 println!("Agent {} created", state.config.name);
             }
-            AgentAction::Send { name, message, max_turns, socket } => {
+            AgentAction::Send {
+                name,
+                message,
+                max_turns,
+                socket,
+            } => {
                 // Socket priority: explicit --socket (if exists) > agent's bus from state > direct exec.
                 let effective_socket = if std::path::Path::new(&socket).exists() {
                     Some(socket)
                 } else {
                     agent::load_state(&name).ok().and_then(|s| {
                         let bus = config::agent_bus_socket(&s.config.work_dir);
-                        if std::path::Path::new(&bus).exists() { Some(bus) } else { None }
+                        if std::path::Path::new(&bus).exists() {
+                            Some(bus)
+                        } else {
+                            None
+                        }
                     })
                 };
 
@@ -188,14 +206,21 @@ async fn main() -> anyhow::Result<()> {
                     println!("No agents registered");
                 } else {
                     println!(
-                        "{:<15} {:<7} {:<8} {:<10} {:<12} {}",
-                        "NAME", "STATUS", "TURNS", "COST", "USER", "MODEL"
+                        "{:<15} {:<7} {:<8} {:<10} {:<12} MODEL",
+                        "NAME", "STATUS", "TURNS", "COST", "USER"
                     );
                     for a in agents {
-                        let status = if live.contains(&a.config.name) { "live" } else { "idle" };
+                        let status = if live.contains(&a.config.name) {
+                            "live"
+                        } else {
+                            "idle"
+                        };
                         println!(
                             "{:<15} {:<7} {:<8} ${:<9.2} {:<12} {}",
-                            a.config.name, status, a.total_turns, a.total_cost,
+                            a.config.name,
+                            status,
+                            a.total_turns,
+                            a.total_cost,
                             a.config.unix_user.as_deref().unwrap_or("-"),
                             a.config.model,
                         );
@@ -206,16 +231,29 @@ async fn main() -> anyhow::Result<()> {
                 let s = agent::load_state(&name)?;
                 println!("Agent:      {}", s.config.name);
                 println!("Model:      {}", s.config.model);
-                println!("Unix user:  {}", s.config.unix_user.as_deref().unwrap_or("-"));
+                println!(
+                    "Unix user:  {}",
+                    s.config.unix_user.as_deref().unwrap_or("-")
+                );
                 println!("Work dir:   {}", s.config.work_dir);
-                println!("Bus:        {}", config::agent_bus_socket(&s.config.work_dir));
-                println!("Config:     {}", s.config.config_path.as_deref().unwrap_or("-"));
+                println!(
+                    "Bus:        {}",
+                    config::agent_bus_socket(&s.config.work_dir)
+                );
+                println!(
+                    "Config:     {}",
+                    s.config.config_path.as_deref().unwrap_or("-")
+                );
                 println!("Total turns:{}", s.total_turns);
                 println!("Total cost: ${:.4}", s.total_cost);
                 println!("Budget:     ${:.2}", s.config.budget_usd);
                 println!(
                     "Session:    {}",
-                    if s.session_id.is_empty() { "-" } else { &s.session_id }
+                    if s.session_id.is_empty() {
+                        "-"
+                    } else {
+                        &s.session_id
+                    }
                 );
                 println!("Created:    {}", s.created_at);
             }
@@ -226,7 +264,12 @@ async fn main() -> anyhow::Result<()> {
                 } else {
                     let paths: Vec<_> = entries.iter().map(|(p, _)| p.clone()).collect();
                     for (_, entry) in &entries {
-                        println!("─── {} → {} [{}] ───", entry.source, entry.agent, &entry.timestamp[..19.min(entry.timestamp.len())]);
+                        println!(
+                            "─── {} → {} [{}] ───",
+                            entry.source,
+                            entry.agent,
+                            &entry.timestamp[..19.min(entry.timestamp.len())]
+                        );
                         println!("Task: {}", truncate_main(&entry.task, 120));
                         if let Some(ref result) = entry.result {
                             println!("{}", result);
@@ -246,19 +289,33 @@ async fn main() -> anyhow::Result<()> {
                 agent::remove(&name).await?;
                 println!("Agent {} removed", name);
             }
-            AgentAction::Spawn { name, task, socket, work_dir, model, max_turns } => {
+            AgentAction::Spawn {
+                name,
+                task,
+                socket,
+                work_dir,
+                model,
+                max_turns,
+            } => {
                 let bus_socket = socket
                     .or_else(|| std::env::var("DESKD_BUS_SOCKET").ok())
-                    .ok_or_else(|| anyhow::anyhow!(
-                        "No bus socket: pass --socket or set DESKD_BUS_SOCKET"
-                    ))?;
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("No bus socket: pass --socket or set DESKD_BUS_SOCKET")
+                    })?;
 
                 let parent = std::env::var("DESKD_AGENT_NAME").unwrap_or_else(|_| "unknown".into());
                 let resolved_work_dir = work_dir.unwrap_or_else(|| ".".into());
 
                 let response = agent::spawn_ephemeral(
-                    &name, &task, &model, &resolved_work_dir, max_turns, &bus_socket, &parent,
-                ).await?;
+                    &name,
+                    &task,
+                    &model,
+                    &resolved_work_dir,
+                    max_turns,
+                    &bus_socket,
+                    &parent,
+                )
+                .await?;
 
                 println!("{}", response);
             }
@@ -339,18 +396,21 @@ async fn serve(config_path: String) -> anyhow::Result<()> {
                 })
                 .unwrap_or_default();
             tokio::spawn(async move {
-                if let Err(e) = adapters::telegram::run(token, bus, agent_name.clone(), mention_only_chats).await {
+                if let Err(e) =
+                    adapters::telegram::run(token, bus, agent_name.clone(), mention_only_chats)
+                        .await
+                {
                     tracing::error!(agent = %agent_name, error = %e, "telegram adapter failed");
                 }
             });
         }
 
         // Start schedule tasks if the user config has schedules.
-        if let Some(ref ucfg) = user_cfg {
-            if !ucfg.schedules.is_empty() {
-                schedule::start(ucfg.schedules.clone(), bus_socket.clone(), name.clone());
-                info!(agent = %name, count = ucfg.schedules.len(), "started schedules");
-            }
+        if let Some(ref ucfg) = user_cfg
+            && !ucfg.schedules.is_empty()
+        {
+            schedule::start(ucfg.schedules.clone(), bus_socket.clone(), name.clone());
+            info!(agent = %name, count = ucfg.schedules.len(), "started schedules");
         }
 
         // Start worker on the agent's bus.
@@ -381,7 +441,8 @@ async fn query_live_agents(socket: &str) -> anyhow::Result<std::collections::Has
         .await
         .map_err(|e| anyhow::anyhow!("connect: {}", e))?;
 
-    let reg = serde_json::json!({"type": "register", "name": "deskd-cli-list", "subscriptions": []});
+    let reg =
+        serde_json::json!({"type": "register", "name": "deskd-cli-list", "subscriptions": []});
     let mut line = serde_json::to_string(&reg)?;
     line.push('\n');
     stream.write_all(line.as_bytes()).await?;
@@ -398,15 +459,15 @@ async fn query_live_agents(socket: &str) -> anyhow::Result<std::collections::Has
     let result = tokio::time::timeout(timeout, async {
         while let Some(l) = lines.next_line().await? {
             let v: serde_json::Value = serde_json::from_str(&l)?;
-            if v.get("type").and_then(|t| t.as_str()) == Some("list_response") {
-                if let Some(arr) = v.get("clients").and_then(|c| c.as_array()) {
-                    return Ok::<_, anyhow::Error>(
-                        arr.iter()
-                            .filter_map(|n| n.as_str())
-                            .map(|s| s.to_string())
-                            .collect(),
-                    );
-                }
+            if v.get("type").and_then(|t| t.as_str()) == Some("list_response")
+                && let Some(arr) = v.get("clients").and_then(|c| c.as_array())
+            {
+                return Ok::<_, anyhow::Error>(
+                    arr.iter()
+                        .filter_map(|n| n.as_str())
+                        .map(|s| s.to_string())
+                        .collect(),
+                );
             }
         }
         Ok(Default::default())

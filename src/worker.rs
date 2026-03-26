@@ -32,7 +32,13 @@ pub async fn bus_connect(
 }
 
 /// Helper: write an inbox entry for a completed task.
-fn write_inbox(name: &str, msg: &Message, task: &str, result: Option<String>, error: Option<String>) {
+fn write_inbox(
+    name: &str,
+    msg: &Message,
+    task: &str,
+    result: Option<String>,
+    error: Option<String>,
+) {
     let entry = inbox::InboxEntry {
         id: msg.id.clone(),
         agent: name.to_string(),
@@ -98,7 +104,9 @@ pub async fn run(name: &str, socket_path: &str, bus_socket: Option<String>) -> R
             continue;
         }
 
-        let task = msg.payload.get("task")
+        let task = msg
+            .payload
+            .get("task")
             .and_then(|t| t.as_str())
             .unwrap_or_default();
 
@@ -109,12 +117,16 @@ pub async fn run(name: &str, socket_path: &str, bus_socket: Option<String>) -> R
 
         info!(agent = %name, source = %msg.source, task = %truncate(task, 80), "processing task");
 
-        let max_turns = msg.payload.get("max_turns")
+        let max_turns = msg
+            .payload
+            .get("max_turns")
             .and_then(|t| t.as_u64())
             .map(|t| t as u32);
 
         // Detect Telegram messages by reply_to = "telegram.out:<chat_id>"
-        let telegram_chat_id = msg.reply_to.as_deref()
+        let telegram_chat_id = msg
+            .reply_to
+            .as_deref()
             .and_then(|s| s.strip_prefix("telegram.out:"))
             .and_then(|id| id.parse::<i64>().ok());
 
@@ -123,7 +135,13 @@ pub async fn run(name: &str, socket_path: &str, bus_socket: Option<String>) -> R
             let ctrl_target = format!("telegram.ctrl:{}", chat_id);
 
             // Signal typing start
-            write_bus_envelope(&writer, name, &ctrl_target, serde_json::json!({"typing": true})).await;
+            write_bus_envelope(
+                &writer,
+                name,
+                &ctrl_target,
+                serde_json::json!({"typing": true}),
+            )
+            .await;
 
             // Stream assistant blocks to Telegram as they arrive
             let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -137,15 +155,24 @@ pub async fn run(name: &str, socket_path: &str, bus_socket: Option<String>) -> R
                         &name_owned,
                         &reply_owned,
                         serde_json::json!({"result": text}),
-                    ).await;
+                    )
+                    .await;
                 }
             });
 
-            let result = agent::send_streaming(name, task, max_turns, bus_socket.as_deref(), progress_tx).await;
+            let result =
+                agent::send_streaming(name, task, max_turns, bus_socket.as_deref(), progress_tx)
+                    .await;
             fwd_task.await.ok();
 
             // Signal typing stop
-            write_bus_envelope(&writer, name, &ctrl_target, serde_json::json!({"typing": false})).await;
+            write_bus_envelope(
+                &writer,
+                name,
+                &ctrl_target,
+                serde_json::json!({"typing": false}),
+            )
+            .await;
 
             if let Err(e) = result {
                 warn!(agent = %name, error = %e, "task failed");
@@ -155,7 +182,8 @@ pub async fn run(name: &str, socket_path: &str, bus_socket: Option<String>) -> R
                     name,
                     &reply_target,
                     serde_json::json!({"error": format!("{}", e), "in_reply_to": msg.id}),
-                ).await;
+                )
+                .await;
             } else {
                 info!(agent = %name, "task completed (streamed to Telegram)");
             }
@@ -273,9 +301,17 @@ pub async fn send_via_bus(
     let mut lines = BufReader::new(reader).lines();
     if let Some(response_line) = lines.next_line().await? {
         let resp: serde_json::Value = serde_json::from_str(&response_line)?;
-        if let Some(result) = resp.get("payload").and_then(|p| p.get("result")).and_then(|r| r.as_str()) {
+        if let Some(result) = resp
+            .get("payload")
+            .and_then(|p| p.get("result"))
+            .and_then(|r| r.as_str())
+        {
             println!("{}", result);
-        } else if let Some(err) = resp.get("payload").and_then(|p| p.get("error")).and_then(|e| e.as_str()) {
+        } else if let Some(err) = resp
+            .get("payload")
+            .and_then(|p| p.get("error"))
+            .and_then(|e| e.as_str())
+        {
             bail!("Agent error: {}", err);
         } else {
             println!("{}", serde_json::to_string_pretty(&resp)?);
@@ -300,7 +336,9 @@ async fn write_bus_envelope(
         "payload": payload,
         "metadata": {"priority": 5u8},
     });
-    let Ok(mut line) = serde_json::to_string(&envelope) else { return };
+    let Ok(mut line) = serde_json::to_string(&envelope) else {
+        return;
+    };
     line.push('\n');
     let mut w = writer.lock().await;
     let _ = w.write_all(line.as_bytes()).await;

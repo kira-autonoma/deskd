@@ -10,21 +10,21 @@
 /// Environment variables (set by deskd when spawning claude):
 ///   DESKD_BUS_SOCKET   — Unix socket path of the agent's bus
 ///   DESKD_AGENT_CONFIG — Path to the agent's deskd.yaml
-
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::config::{self, UserConfig};
+use crate::config::UserConfig;
 
 // ─── MCP Protocol types ───────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 struct Request {
+    #[allow(dead_code)]
     jsonrpc: String,
     id: Option<Value>,
     method: String,
@@ -44,7 +44,12 @@ struct Response {
 
 impl Response {
     fn ok(id: Option<Value>, result: Value) -> Self {
-        Self { jsonrpc: "2.0", id, result: Some(result), error: None }
+        Self {
+            jsonrpc: "2.0",
+            id,
+            result: Some(result),
+            error: None,
+        }
     }
 
     fn err(id: Option<Value>, code: i32, message: &str) -> Self {
@@ -62,9 +67,8 @@ impl Response {
 /// Run the MCP server for the given agent. Reads JSON-RPC from stdin, writes to stdout.
 /// Terminates when stdin closes (i.e. when Claude exits).
 pub async fn run(agent_name: &str) -> Result<()> {
-    let bus_socket = std::env::var("DESKD_BUS_SOCKET").with_context(|| {
-        "DESKD_BUS_SOCKET not set — was this started by deskd?"
-    })?;
+    let bus_socket = std::env::var("DESKD_BUS_SOCKET")
+        .with_context(|| "DESKD_BUS_SOCKET not set — was this started by deskd?")?;
 
     let config_path = std::env::var("DESKD_AGENT_CONFIG").ok();
     let user_config = config_path
@@ -75,7 +79,7 @@ pub async fn run(agent_name: &str) -> Result<()> {
 
     let stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
-    let mut reader = BufReader::new(stdin);
+    let reader = BufReader::new(stdin);
 
     // Detect framing mode from first line of input.
     // Claude Code uses newline-delimited JSON (no Content-Length headers).
@@ -268,14 +272,13 @@ async fn call_send_message(
         .context("missing text")?;
 
     // Enforce publish allow-list if the calling agent is a sub-agent in config.
-    if let Some(cfg) = user_config {
-        if let Some(sub) = cfg.agents.iter().find(|a| a.name == agent_name) {
-            if let Some(ref allow) = sub.publish {
-                let allowed = allow.iter().any(|pattern| glob_match(pattern, target));
-                if !allowed {
-                    bail!("publish to '{}' not allowed by config", target);
-                }
-            }
+    if let Some(cfg) = user_config
+        && let Some(sub) = cfg.agents.iter().find(|a| a.name == agent_name)
+        && let Some(ref allow) = sub.publish
+    {
+        let allowed = allow.iter().any(|pattern| glob_match(pattern, target));
+        if !allowed {
+            bail!("publish to '{}' not allowed by config", target);
         }
     }
 
@@ -319,18 +322,31 @@ async fn call_add_persistent_agent(
     parent_name: &str,
     bus_socket: &str,
 ) -> Result<Value> {
-    let name = args.get("name").and_then(|n| n.as_str()).context("missing name")?;
-    let model = args.get("model").and_then(|m| m.as_str()).context("missing model")?;
-    let system_prompt = args.get("system_prompt").and_then(|s| s.as_str()).unwrap_or("");
+    let name = args
+        .get("name")
+        .and_then(|n| n.as_str())
+        .context("missing name")?;
+    let model = args
+        .get("model")
+        .and_then(|m| m.as_str())
+        .context("missing model")?;
+    let system_prompt = args
+        .get("system_prompt")
+        .and_then(|s| s.as_str())
+        .unwrap_or("");
     let subscribe: Vec<String> = args
         .get("subscribe")
         .and_then(|s| s.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(str::to_string).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::to_string)
+                .collect()
+        })
         .unwrap_or_else(|| vec![format!("agent:{}", name)]);
 
     // Get the deskd binary path (we are running as a subprocess of claude, so $0 is deskd).
-    let deskd_bin = std::env::var("DESKD_BIN")
-        .unwrap_or_else(|_| "deskd".to_string());
+    let deskd_bin = std::env::var("DESKD_BIN").unwrap_or_else(|_| "deskd".to_string());
 
     // Work dir: same as parent (best effort from env or cwd).
     let work_dir = std::env::var("PWD").unwrap_or_else(|_| "/tmp".to_string());
@@ -338,10 +354,15 @@ async fn call_add_persistent_agent(
     // Create agent state file via `deskd agent create`.
     let create_status = tokio::process::Command::new(&deskd_bin)
         .args([
-            "agent", "create", name,
-            "--model", model,
-            "--prompt", system_prompt,
-            "--workdir", &work_dir,
+            "agent",
+            "create",
+            name,
+            "--model",
+            model,
+            "--prompt",
+            system_prompt,
+            "--workdir",
+            &work_dir,
         ])
         .status()
         .await;

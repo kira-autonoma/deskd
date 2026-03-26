@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, info, warn};
 
 use crate::message::{Envelope, Message};
@@ -60,7 +60,9 @@ impl BusState {
             for client in self.clients.values() {
                 if client.name != msg.source {
                     for sub in &client.subscriptions {
-                        if sub == target || (sub.ends_with('*') && target.starts_with(&sub[..sub.len()-1])) {
+                        if sub == target
+                            || (sub.ends_with('*') && target.starts_with(&sub[..sub.len() - 1]))
+                        {
                             let _ = client.tx.send(msg.clone());
                             delivered = true;
                             break;
@@ -218,7 +220,11 @@ mod tests {
         BusState::new()
     }
 
-    fn register_client(bus: &mut BusState, name: &str, subs: Vec<&str>) -> mpsc::UnboundedReceiver<Message> {
+    fn register_client(
+        bus: &mut BusState,
+        name: &str,
+        subs: Vec<&str>,
+    ) -> mpsc::UnboundedReceiver<Message> {
         let (tx, rx) = mpsc::unbounded_channel();
         bus.clients.insert(
             name.to_string(),
@@ -298,7 +304,10 @@ mod tests {
 
         // telegram adapter should receive via glob match
         let received = rx_telegram.try_recv();
-        assert!(received.is_ok(), "telegram adapter should receive message targeted to telegram:-123456");
+        assert!(
+            received.is_ok(),
+            "telegram adapter should receive message targeted to telegram:-123456"
+        );
         let received_msg = received.unwrap();
         assert_eq!(received_msg.target, "telegram:-123456");
 
@@ -326,7 +335,10 @@ mod tests {
         let msg = make_msg("telegram-adapter", "telegram:-123");
         bus.route(&msg);
 
-        assert!(rx.try_recv().is_err(), "should not deliver to sender even if subscription matches");
+        assert!(
+            rx.try_recv().is_err(),
+            "should not deliver to sender even if subscription matches"
+        );
     }
 
     #[tokio::test]

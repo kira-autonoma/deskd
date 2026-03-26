@@ -51,7 +51,9 @@ async fn run_schedule(def: ScheduleDef, bus_socket: String, agent_name: String) 
             }
         };
 
-        let duration = (next - now).to_std().unwrap_or(std::time::Duration::from_secs(60));
+        let duration = (next - now)
+            .to_std()
+            .unwrap_or(std::time::Duration::from_secs(60));
         debug!(agent = %agent_name, target = %def.target, sleep_secs = duration.as_secs(), "schedule sleeping until next fire");
         tokio::time::sleep(duration).await;
 
@@ -118,9 +120,7 @@ async fn fire_github_poll(def: &ScheduleDef, bus_socket: &str, agent_name: &str)
                     let body = issue.get("body").and_then(|b| b.as_str()).unwrap_or("");
                     let url = issue.get("url").and_then(|u| u.as_str()).unwrap_or("");
 
-                    let text = format!(
-                        "GitHub issue {repo}#{number}: {title}\n{url}\n\n{body}"
-                    );
+                    let text = format!("GitHub issue {repo}#{number}: {title}\n{url}\n\n{body}");
                     info!(agent = %agent_name, repo = %repo, issue = number, "posting github issue to bus");
                     if let Err(e) = post_to_bus(bus_socket, agent_name, &def.target, &text).await {
                         warn!(error = %e, "failed to post github issue to bus");
@@ -140,12 +140,18 @@ async fn fire_github_poll(def: &ScheduleDef, bus_socket: &str, agent_name: &str)
 async fn fetch_github_issues(repo: &str, label: &str) -> Result<Vec<serde_json::Value>> {
     let output = tokio::process::Command::new("gh")
         .args([
-            "issue", "list",
-            "--repo", repo,
-            "--label", label,
-            "--state", "open",
-            "--json", "title,body,number,url",
-            "--limit", "10",
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--label",
+            label,
+            "--state",
+            "open",
+            "--json",
+            "title,body,number,url",
+            "--limit",
+            "10",
         ])
         .output()
         .await
@@ -156,18 +162,13 @@ async fn fetch_github_issues(repo: &str, label: &str) -> Result<Vec<serde_json::
         anyhow::bail!("gh issue list failed: {}", stderr.trim());
     }
 
-    let issues: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout)
-        .context("failed to parse gh output")?;
+    let issues: Vec<serde_json::Value> =
+        serde_json::from_slice(&output.stdout).context("failed to parse gh output")?;
     Ok(issues)
 }
 
 /// Post a task message to the bus.
-async fn post_to_bus(
-    socket_path: &str,
-    agent_name: &str,
-    target: &str,
-    text: &str,
-) -> Result<()> {
+async fn post_to_bus(socket_path: &str, agent_name: &str, target: &str, text: &str) -> Result<()> {
     let mut stream = UnixStream::connect(socket_path)
         .await
         .with_context(|| format!("schedule: failed to connect to bus at {}", socket_path))?;
