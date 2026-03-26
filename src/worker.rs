@@ -94,60 +94,108 @@ pub async fn run(name: &str, socket_path: &str, bus_socket: Option<String>) -> R
             .and_then(|t| t.as_u64())
             .map(|t| t as u32);
 
-        match agent::send(name, task, max_turns, bus_socket.as_deref()).await {
-            Ok(response) => {
-                info!(agent = %name, "task completed, posting result");
+        // Detect Telegram messages by reply_to = "telegram.out:<chat_id>"
+        let telegram_chat_id = msg.reply_to.as_deref()
+            .and_then(|s| s.strip_prefix("telegram.out:"))
+            .and_then(|id| id.parse::<i64>().ok());
 
-                let target = msg.reply_to.as_deref().unwrap_or(&msg.source);
+        if let Some(chat_id) = telegram_chat_id {
+            let reply_target = format!("telegram.out:{}", chat_id);
+            let ctrl_target = format!("telegram.ctrl:{}", chat_id);
 
-                let reply = Message {
-                    id: Uuid::new_v4().to_string(),
-                    source: name.to_string(),
-                    target: target.to_string(),
-                    payload: serde_json::json!({
-                        "result": response,
-                        "in_reply_to": msg.id,
-                    }),
-                    reply_to: None,
-                    metadata: Metadata::default(),
-                };
+            // Signal typing start
+            write_bus_envelope(&writer, name, &ctrl_target, serde_json::json!({"typing": true})).await;
 
-                let envelope = serde_json::json!({
-                    "type": "message",
-                    "id": reply.id,
-                    "source": reply.source,
-                    "target": reply.target,
-                    "payload": reply.payload,
-                    "metadata": reply.metadata,
-                });
-                let mut reply_line = serde_json::to_string(&envelope)?;
-                reply_line.push('\n');
-
-                let mut w = writer.lock().await;
-                if let Err(e) = w.write_all(reply_line.as_bytes()).await {
-                    warn!(agent = %name, error = %e, target = %target, "failed to write reply to bus");
-                } else {
-                    debug!(agent = %name, target = %target, "reply sent to bus");
+            // Stream assistant blocks to Telegram as they arrive
+            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+            let writer_fwd = writer.clone();
+            let name_owned = name.to_string();
+            let reply_owned = reply_target.clone();
+            let fwd_task = tokio::spawn(async move {
+                while let Some(text) = progress_rx.recv().await {
+                    write_bus_envelope(
+                        &writer_fwd,
+                        &name_owned,
+                        &reply_owned,
+                        serde_json::json!({"result": text}),
+                    ).await;
                 }
-            }
-            Err(e) => {
-                warn!(agent = %name, error = %e, "task failed");
+            });
 
-                if let Some(reply_to) = &msg.reply_to {
-                    let error_msg = serde_json::json!({
+            let result = agent::send_streaming(name, task, max_turns, bus_socket.as_deref(), progress_tx).await;
+            fwd_task.await.ok();
+
+            // Signal typing stop
+            write_bus_envelope(&writer, name, &ctrl_target, serde_json::json!({"typing": false})).await;
+
+            if let Err(e) = result {
+                warn!(agent = %name, error = %e, "task failed");
+                write_bus_envelope(
+                    &writer,
+                    name,
+                    &reply_target,
+                    serde_json::json!({"error": format!("{}", e), "in_reply_to": msg.id}),
+                ).await;
+            } else {
+                info!(agent = %name, "task completed (streamed to Telegram)");
+            }
+        } else {
+            // Non-Telegram: send full response after completion
+            match agent::send(name, task, max_turns, bus_socket.as_deref()).await {
+                Ok(response) => {
+                    info!(agent = %name, "task completed, posting result");
+
+                    let target = msg.reply_to.as_deref().unwrap_or(&msg.source);
+
+                    let reply = Message {
+                        id: Uuid::new_v4().to_string(),
+                        source: name.to_string(),
+                        target: target.to_string(),
+                        payload: serde_json::json!({
+                            "result": response,
+                            "in_reply_to": msg.id,
+                        }),
+                        reply_to: None,
+                        metadata: Metadata::default(),
+                    };
+
+                    let envelope = serde_json::json!({
                         "type": "message",
-                        "id": Uuid::new_v4().to_string(),
-                        "source": name,
-                        "target": reply_to,
-                        "payload": {"error": format!("{}", e), "in_reply_to": &msg.id},
-                        "metadata": {"priority": 5u8},
+                        "id": reply.id,
+                        "source": reply.source,
+                        "target": reply.target,
+                        "payload": reply.payload,
+                        "metadata": reply.metadata,
                     });
-                    let mut err_line = serde_json::to_string(&error_msg)?;
-                    err_line.push('\n');
+                    let mut reply_line = serde_json::to_string(&envelope)?;
+                    reply_line.push('\n');
 
                     let mut w = writer.lock().await;
-                    if let Err(write_err) = w.write_all(err_line.as_bytes()).await {
-                        warn!(agent = %name, error = %write_err, "failed to write error reply to bus");
+                    if let Err(e) = w.write_all(reply_line.as_bytes()).await {
+                        warn!(agent = %name, error = %e, target = %target, "failed to write reply to bus");
+                    } else {
+                        debug!(agent = %name, target = %target, "reply sent to bus");
+                    }
+                }
+                Err(e) => {
+                    warn!(agent = %name, error = %e, "task failed");
+
+                    if let Some(reply_to) = &msg.reply_to {
+                        let error_msg = serde_json::json!({
+                            "type": "message",
+                            "id": Uuid::new_v4().to_string(),
+                            "source": name,
+                            "target": reply_to,
+                            "payload": {"error": format!("{}", e), "in_reply_to": &msg.id},
+                            "metadata": {"priority": 5u8},
+                        });
+                        let mut err_line = serde_json::to_string(&error_msg)?;
+                        err_line.push('\n');
+
+                        let mut w = writer.lock().await;
+                        if let Err(write_err) = w.write_all(err_line.as_bytes()).await {
+                            warn!(agent = %name, error = %write_err, "failed to write error reply to bus");
+                        }
                     }
                 }
             }
@@ -209,6 +257,27 @@ pub async fn send_via_bus(
     }
 
     Ok(())
+}
+
+/// Write a bus message envelope to the shared writer.
+async fn write_bus_envelope(
+    writer: &std::sync::Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
+    source: &str,
+    target: &str,
+    payload: serde_json::Value,
+) {
+    let envelope = serde_json::json!({
+        "type": "message",
+        "id": Uuid::new_v4().to_string(),
+        "source": source,
+        "target": target,
+        "payload": payload,
+        "metadata": {"priority": 5u8},
+    });
+    let Ok(mut line) = serde_json::to_string(&envelope) else { return };
+    line.push('\n');
+    let mut w = writer.lock().await;
+    let _ = w.write_all(line.as_bytes()).await;
 }
 
 fn truncate(s: &str, max: usize) -> &str {

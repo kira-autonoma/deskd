@@ -8,13 +8,21 @@
 /// Outbound text is converted from Markdown to Telegram HTML before sending.
 use anyhow::{Context, Result};
 use serde_json::Value;
+use std::collections::HashMap;
 use teloxide::prelude::*;
-use teloxide::types::ParseMode;
+use teloxide::types::{ChatAction, ParseMode};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
+use tokio::time::Duration;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
+
+enum OutboundCmd {
+    Text { chat_id: i64, text: String },
+    TypingStart(i64),
+    TypingStop(i64),
+}
 
 /// Run the Telegram adapter for a specific agent.
 /// `agent_name` is used to name the bus registration and for logging.
@@ -32,10 +40,10 @@ pub async fn run(token: String, socket_path: String, agent_name: String) -> Resu
 
     let adapter_name = format!("telegram-{}", agent_name);
 
-    // Channel for outbound messages: (chat_id, text)
-    let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<(i64, String)>();
+    // Channel for outbound commands: text messages + typing control
+    let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<OutboundCmd>();
 
-    // Task 1: connect to bus, subscribe to telegram.out:*, forward to outbound channel
+    // Task 1: connect to bus, subscribe to telegram.out:* and telegram.ctrl:*, forward to outbound channel
     let bus_task = {
         let outbound_tx = outbound_tx.clone();
         let socket = socket_path.clone();
@@ -47,7 +55,7 @@ pub async fn run(token: String, socket_path: String, agent_name: String) -> Resu
         })
     };
 
-    // Task 2: send outbound messages to Telegram
+    // Task 2: send outbound messages to Telegram, manage typing indicators
     let sender_task = {
         let bot = bot.clone();
         tokio::spawn(async move {
@@ -75,11 +83,11 @@ pub async fn run(token: String, socket_path: String, agent_name: String) -> Resu
     Ok(())
 }
 
-/// Subscribe to `telegram.out:*` on the bus and forward messages to the outbound channel.
+/// Subscribe to `telegram.out:*` and `telegram.ctrl:*` on the bus, forward to outbound channel.
 async fn bus_loop(
     socket_path: &str,
     adapter_name: &str,
-    outbound_tx: mpsc::UnboundedSender<(i64, String)>,
+    outbound_tx: mpsc::UnboundedSender<OutboundCmd>,
 ) -> Result<()> {
     let mut stream = UnixStream::connect(socket_path)
         .await
@@ -88,7 +96,7 @@ async fn bus_loop(
     let reg = serde_json::json!({
         "type": "register",
         "name": adapter_name,
-        "subscriptions": ["telegram.out:*"],
+        "subscriptions": ["telegram.out:*", "telegram.ctrl:*"],
     });
     let mut line = serde_json::to_string(&reg)?;
     line.push('\n');
@@ -114,7 +122,7 @@ async fn bus_loop(
 
         let target = msg.get("target").and_then(|t| t.as_str()).unwrap_or("");
 
-        // Target format: "telegram.out:<chat_id>"
+        // Target format: "telegram.out:<chat_id>" — send text message
         if let Some(chat_id_str) = target.strip_prefix("telegram.out:") {
             let chat_id: i64 = match chat_id_str.parse() {
                 Ok(id) => id,
@@ -131,7 +139,29 @@ async fn bus_loop(
                 .unwrap_or("(no content)");
 
             debug!(chat_id = chat_id, "forwarding bus message to Telegram");
-            if outbound_tx.send((chat_id, text.to_string())).is_err() {
+            if outbound_tx.send(OutboundCmd::Text { chat_id, text: text.to_string() }).is_err() {
+                warn!("telegram adapter: outbound channel closed");
+                break;
+            }
+
+        // Target format: "telegram.ctrl:<chat_id>" — typing control
+        } else if let Some(chat_id_str) = target.strip_prefix("telegram.ctrl:") {
+            let chat_id: i64 = match chat_id_str.parse() {
+                Ok(id) => id,
+                Err(_) => {
+                    warn!(target = %target, "telegram adapter: invalid chat_id in ctrl target");
+                    continue;
+                }
+            };
+
+            let typing = msg
+                .get("payload")
+                .and_then(|p| p.get("typing"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let cmd = if typing { OutboundCmd::TypingStart(chat_id) } else { OutboundCmd::TypingStop(chat_id) };
+            if outbound_tx.send(cmd).is_err() {
                 warn!("telegram adapter: outbound channel closed");
                 break;
             }
@@ -142,21 +172,55 @@ async fn bus_loop(
 }
 
 /// Send messages from the outbound channel to Telegram.
-/// Converts Markdown to HTML; falls back to plain text if HTML parse fails.
-async fn outbound_sender(bot: Bot, mut rx: mpsc::UnboundedReceiver<(i64, String)>) {
-    while let Some((chat_id, text)) = rx.recv().await {
-        let chat = ChatId(chat_id);
-        let html = markdown_to_html(&text);
+/// Manages per-chat typing indicators and converts Markdown to HTML.
+async fn outbound_sender(bot: Bot, mut rx: mpsc::UnboundedReceiver<OutboundCmd>) {
+    let mut typing_tasks: HashMap<i64, tokio::task::JoinHandle<()>> = HashMap::new();
 
-        // Try HTML first, fall back to plain text on error.
-        let result = bot
-            .send_message(chat, &html)
-            .parse_mode(ParseMode::Html)
-            .await;
+    while let Some(cmd) = rx.recv().await {
+        match cmd {
+            OutboundCmd::Text { chat_id, text } => {
+                // Cancel typing indicator for this chat when a message arrives.
+                if let Some(handle) = typing_tasks.remove(&chat_id) {
+                    handle.abort();
+                }
 
-        if result.is_err() {
-            if let Err(e) = bot.send_message(chat, &text).await {
-                warn!(chat_id = chat_id, error = %e, "failed to send Telegram message");
+                let chat = ChatId(chat_id);
+                let html = markdown_to_html(&text);
+
+                // Try HTML first, fall back to plain text on error.
+                let result = bot
+                    .send_message(chat, &html)
+                    .parse_mode(ParseMode::Html)
+                    .await;
+
+                if result.is_err() {
+                    if let Err(e) = bot.send_message(chat, &text).await {
+                        warn!(chat_id = chat_id, error = %e, "failed to send Telegram message");
+                    }
+                }
+            }
+            OutboundCmd::TypingStart(chat_id) => {
+                // Cancel any existing typing task for this chat.
+                if let Some(handle) = typing_tasks.remove(&chat_id) {
+                    handle.abort();
+                }
+                // Spawn a loop that sends "typing" action every 4 seconds.
+                // Telegram shows the indicator for ~5s, so 4s keeps it alive continuously.
+                let bot_clone = bot.clone();
+                let handle = tokio::spawn(async move {
+                    loop {
+                        let _ = bot_clone
+                            .send_chat_action(ChatId(chat_id), ChatAction::Typing)
+                            .await;
+                        tokio::time::sleep(Duration::from_secs(4)).await;
+                    }
+                });
+                typing_tasks.insert(chat_id, handle);
+            }
+            OutboundCmd::TypingStop(chat_id) => {
+                if let Some(handle) = typing_tasks.remove(&chat_id) {
+                    handle.abort();
+                }
             }
         }
     }

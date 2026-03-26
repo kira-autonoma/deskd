@@ -3,6 +3,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
@@ -153,6 +154,28 @@ pub async fn create_or_recover(
 /// `bus_socket`: path to the agent's bus (injected as DESKD_BUS_SOCKET).
 /// Claude uses this to call the `send_message` MCP tool.
 pub async fn send(name: &str, message: &str, max_turns: Option<u32>, bus_socket: Option<&str>) -> Result<String> {
+    send_inner(name, message, max_turns, bus_socket, None).await
+}
+
+/// Like `send`, but streams each assistant text block to `progress_tx` as it arrives.
+/// Still returns the full concatenated response when done.
+pub async fn send_streaming(
+    name: &str,
+    message: &str,
+    max_turns: Option<u32>,
+    bus_socket: Option<&str>,
+    progress_tx: tokio::sync::mpsc::UnboundedSender<String>,
+) -> Result<String> {
+    send_inner(name, message, max_turns, bus_socket, Some(progress_tx)).await
+}
+
+async fn send_inner(
+    name: &str,
+    message: &str,
+    max_turns: Option<u32>,
+    bus_socket: Option<&str>,
+    progress_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+) -> Result<String> {
     let mut state = load_state(name)?;
 
     let turns = max_turns.unwrap_or(state.config.max_turns);
@@ -195,22 +218,30 @@ pub async fn send(name: &str, message: &str, max_turns: Option<u32>, bus_socket:
     }
 
     let mut cmd = build_command(&state.config, &args, &extra_env);
-    let output = cmd
-        .output()
-        .await
-        .context("Failed to run claude CLI")?;
+    let mut child = cmd.spawn().context("Failed to spawn claude CLI")?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
 
+    // Read stderr in background so it doesn't block stdout parsing.
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = String::new();
+        let mut reader = tokio::io::BufReader::new(stderr);
+        let _ = reader.read_to_string(&mut buf).await;
+        buf
+    });
+
+    let mut lines = tokio::io::BufReader::new(stdout).lines();
     let mut response_text = String::new();
     let mut new_session_id = String::new();
     let mut task_cost = 0.0;
     let mut task_turns = 0u32;
 
-    for line in stdout.lines() {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+    while let Some(line) = lines.next_line().await? {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) {
             match v.get("type").and_then(|t| t.as_str()) {
                 Some("assistant") => {
+                    let mut block_text = String::new();
                     if let Some(blocks) = v
                         .get("message")
                         .and_then(|m| m.get("content"))
@@ -219,10 +250,16 @@ pub async fn send(name: &str, message: &str, max_turns: Option<u32>, bus_socket:
                         for block in blocks {
                             if block.get("type").and_then(|t| t.as_str()) == Some("text") {
                                 if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                                    response_text.push_str(text);
+                                    block_text.push_str(text);
                                 }
                             }
                         }
+                    }
+                    if !block_text.is_empty() {
+                        if let Some(tx) = &progress_tx {
+                            let _ = tx.send(block_text.clone());
+                        }
+                        response_text.push_str(&block_text);
                     }
                 }
                 Some("result") => {
@@ -241,6 +278,9 @@ pub async fn send(name: &str, message: &str, max_turns: Option<u32>, bus_socket:
         }
     }
 
+    let _ = child.wait().await;
+    let stderr_str = stderr_task.await.unwrap_or_default();
+
     if !new_session_id.is_empty() {
         state.session_id = new_session_id;
     }
@@ -249,9 +289,8 @@ pub async fn send(name: &str, message: &str, max_turns: Option<u32>, bus_socket:
     save_state(&state)?;
 
     if response_text.is_empty() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.is_empty() {
-            bail!("Claude error: {}", stderr.trim());
+        if !stderr_str.is_empty() {
+            bail!("Claude error: {}", stderr_str.trim());
         }
         bail!("No response from claude");
     }
