@@ -173,6 +173,19 @@ async fn bus_loop(
     Ok(())
 }
 
+/// Spawn a background loop that sends typing action every 4 seconds.
+/// Telegram shows the indicator for ~5s, so 4s keeps it alive continuously.
+fn spawn_typing(bot: Bot, chat_id: i64) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let _ = bot
+                .send_chat_action(ChatId(chat_id), ChatAction::Typing)
+                .await;
+            tokio::time::sleep(Duration::from_secs(4)).await;
+        }
+    })
+}
+
 /// Send messages from the outbound channel to Telegram.
 /// Manages per-chat typing indicators and converts Markdown to HTML.
 async fn outbound_sender(bot: Bot, mut rx: mpsc::UnboundedReceiver<OutboundCmd>) {
@@ -181,7 +194,8 @@ async fn outbound_sender(bot: Bot, mut rx: mpsc::UnboundedReceiver<OutboundCmd>)
     while let Some(cmd) = rx.recv().await {
         match cmd {
             OutboundCmd::Text { chat_id, text } => {
-                // Cancel typing indicator for this chat when a message arrives.
+                // Abort current typing loop while sending so Telegram doesn't show
+                // typing and a new message at the same time.
                 if let Some(handle) = typing_tasks.remove(&chat_id) {
                     handle.abort();
                 }
@@ -200,24 +214,17 @@ async fn outbound_sender(bot: Bot, mut rx: mpsc::UnboundedReceiver<OutboundCmd>)
                         warn!(chat_id = chat_id, error = %e, "failed to send Telegram message");
                     }
                 }
+
+                // Restart typing loop — more streaming chunks may still be coming.
+                // Will be cancelled by TypingStop when the task finishes.
+                typing_tasks.insert(chat_id, spawn_typing(bot.clone(), chat_id));
             }
             OutboundCmd::TypingStart(chat_id) => {
                 // Cancel any existing typing task for this chat.
                 if let Some(handle) = typing_tasks.remove(&chat_id) {
                     handle.abort();
                 }
-                // Spawn a loop that sends "typing" action every 4 seconds.
-                // Telegram shows the indicator for ~5s, so 4s keeps it alive continuously.
-                let bot_clone = bot.clone();
-                let handle = tokio::spawn(async move {
-                    loop {
-                        let _ = bot_clone
-                            .send_chat_action(ChatId(chat_id), ChatAction::Typing)
-                            .await;
-                        tokio::time::sleep(Duration::from_secs(4)).await;
-                    }
-                });
-                typing_tasks.insert(chat_id, handle);
+                typing_tasks.insert(chat_id, spawn_typing(bot.clone(), chat_id));
             }
             OutboundCmd::TypingStop(chat_id) => {
                 if let Some(handle) = typing_tasks.remove(&chat_id) {
