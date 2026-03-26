@@ -138,6 +138,10 @@ pub struct UserConfig {
     /// Scheduled actions (cron → bus messages).
     #[serde(default)]
     pub schedules: Vec<ScheduleDef>,
+    /// MCP server config JSON string or file path, passed to claude via --mcp-config.
+    /// Example: '{"mcpServers":{"deskd":{"command":"deskd","args":["mcp","--agent","kira"]}}}'
+    #[serde(default)]
+    pub mcp_config: Option<String>,
 }
 
 fn default_model() -> String {

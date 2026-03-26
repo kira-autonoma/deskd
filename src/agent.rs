@@ -180,10 +180,15 @@ pub async fn send(name: &str, message: &str, max_turns: Option<u32>, bus_socket:
         args.push(state.config.system_prompt.clone());
     }
 
-    // Expose the MCP server so Claude can use send_message, add_persistent_agent, etc.
-    // deskd must be in PATH for the unix user running claude.
-    args.push("--mcp-server".to_string());
-    args.push(format!("deskd mcp --agent {}", name));
+    // MCP server config from deskd.yaml (if configured).
+    if let Some(config_path) = &state.config.config_path {
+        if let Ok(user_cfg) = config::UserConfig::load(config_path) {
+            if let Some(mcp) = &user_cfg.mcp_config {
+                args.push("--mcp-config".to_string());
+                args.push(mcp.clone());
+            }
+        }
+    }
 
     // -p <message> goes last so leading dashes in message are not parsed as flags.
     args.push("-p".to_string());
