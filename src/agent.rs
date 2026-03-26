@@ -157,18 +157,9 @@ pub async fn send(name: &str, message: &str, max_turns: Option<u32>, bus_socket:
 
     let turns = max_turns.unwrap_or(state.config.max_turns);
 
-    // Build args with -p <message> last so messages starting with '-' are not
-    // misinterpreted as flags by the claude CLI.
-    let mut args = vec![
-        "--output-format".to_string(),
-        "stream-json".to_string(),
-        "--verbose".to_string(),
-        "--dangerously-skip-permissions".to_string(),
-        "--model".to_string(),
-        state.config.model.clone(),
-        "--max-turns".to_string(),
-        turns.to_string(),
-    ];
+    // Dynamic args only — the base command + flags come from config.command field.
+    // deskd appends session management and the prompt.
+    let mut args: Vec<String> = Vec::new();
 
     if !state.session_id.is_empty() {
         args.push("--resume".to_string());
@@ -178,16 +169,6 @@ pub async fn send(name: &str, message: &str, max_turns: Option<u32>, bus_socket:
     if !state.config.system_prompt.is_empty() && state.session_id.is_empty() {
         args.push("--system-prompt".to_string());
         args.push(state.config.system_prompt.clone());
-    }
-
-    // MCP server config from deskd.yaml (if configured).
-    if let Some(config_path) = &state.config.config_path {
-        if let Ok(user_cfg) = config::UserConfig::load(config_path) {
-            if let Some(mcp) = &user_cfg.mcp_config {
-                args.push("--mcp-config".to_string());
-                args.push(mcp.clone());
-            }
-        }
     }
 
     // -p <message> goes last so leading dashes in message are not parsed as flags.
