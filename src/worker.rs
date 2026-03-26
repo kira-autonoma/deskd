@@ -43,7 +43,8 @@ fn write_inbox(name: &str, msg: &Message, task: &str, result: Option<String>, er
         in_reply_to: msg.id.clone(),
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
-    if let Err(e) = inbox::write(name, &entry) {
+    // Write to the sender's inbox (e.g. "cli"), so they can read replies.
+    if let Err(e) = inbox::write(&msg.source, &entry) {
         warn!(agent = %name, error = %e, "failed to write inbox entry");
     }
 }
