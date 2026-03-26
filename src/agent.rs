@@ -295,6 +295,21 @@ async fn send_inner(
         if !stderr_str.is_empty() {
             bail!("Claude error: {}", stderr_str.trim());
         }
+        // If we used --resume and got no response, the session_id is stale.
+        // Clear it and retry once with a fresh session.
+        if !state.session_id.is_empty() {
+            warn!(agent = %name, session_id = %state.session_id, "stale session_id — retrying without --resume");
+            state.session_id = String::new();
+            save_state(&state)?;
+            return Box::pin(send_inner(
+                name,
+                message,
+                max_turns,
+                bus_socket,
+                progress_tx,
+            ))
+            .await;
+        }
         bail!("No response from claude");
     }
 
