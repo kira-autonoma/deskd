@@ -544,55 +544,174 @@ async fn publish_to_bus(
 
 // ─── Markdown → Telegram HTML ─────────────────────────────────────────────────
 
-/// Convert a subset of Markdown to Telegram HTML.
-/// Handles: **bold**, *italic*, `inline code`, ```code blocks```.
-/// Escapes &, <, > in plain text portions.
+/// Convert Markdown to Telegram HTML.
+///
+/// Block-level (processed line by line):
+///   # / ## / ###   → bold with ▶ / ▸ / • prefix
+///   --- / *** / ___ → ───────────────────── separator
+///   > blockquote   → <blockquote>
+///   | table |      → ASCII table inside <pre>
+///   ```code```     → <pre>
+///
+/// Inline (within each line):
+///   **bold**, *italic*, ~~strikethrough~~, `code`
 pub fn markdown_to_html(text: &str) -> String {
+    let mut result = String::with_capacity(text.len() * 2);
+    let mut lines = text.lines().peekable();
+
+    while let Some(line) = lines.next() {
+        // ── Fenced code block ──────────────────────────────────────────────
+        if line.trim_start().starts_with("```") {
+            let mut code = String::new();
+            for inner in lines.by_ref() {
+                if inner.trim_start().starts_with("```") {
+                    break;
+                }
+                code.push_str(inner);
+                code.push('\n');
+            }
+            result.push_str("<pre>");
+            result.push_str(&html_escape(code.trim_end()));
+            result.push_str("</pre>\n");
+            continue;
+        }
+
+        // ── Horizontal rule ────────────────────────────────────────────────
+        let trimmed = line.trim();
+        if (trimmed == "---" || trimmed == "***" || trimmed == "___")
+            || (trimmed.len() >= 3 && trimmed.chars().all(|c| c == '-'))
+        {
+            result.push_str("─────────────────────\n");
+            continue;
+        }
+
+        // ── ATX headers (# / ## / ###) ─────────────────────────────────────
+        let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+        if hashes > 0 && hashes <= 6 {
+            let rest = trimmed[hashes..].trim_start();
+            if !rest.is_empty() {
+                let prefix = match hashes {
+                    1 => "▶ ",
+                    2 => "▸ ",
+                    _ => "• ",
+                };
+                result.push_str("<b>");
+                result.push_str(prefix);
+                result.push_str(&inline_to_html(rest));
+                result.push_str("</b>\n");
+                continue;
+            }
+        }
+
+        // ── Table: collect consecutive pipe-containing lines ───────────────
+        if trimmed.starts_with('|') || (trimmed.contains(" | ") && trimmed.contains('|')) {
+            let mut table_lines: Vec<&str> = vec![line];
+            while let Some(&next) = lines.peek() {
+                let nt = next.trim();
+                if nt.starts_with('|') || (nt.contains(" | ") && nt.contains('|')) {
+                    table_lines.push(lines.next().unwrap());
+                } else {
+                    break;
+                }
+            }
+            if table_lines.len() >= 2 {
+                result.push_str(&render_table(&table_lines));
+                result.push('\n');
+                continue;
+            }
+        }
+
+        // ── Blockquote ─────────────────────────────────────────────────────
+        if let Some(inner) = trimmed.strip_prefix("> ").or_else(|| {
+            if trimmed == ">" {
+                Some("")
+            } else {
+                None
+            }
+        }) {
+            result.push_str("<blockquote>");
+            result.push_str(&inline_to_html(inner));
+            result.push_str("</blockquote>\n");
+            continue;
+        }
+
+        // ── Normal line ────────────────────────────────────────────────────
+        result.push_str(&inline_to_html(line));
+        result.push('\n');
+    }
+
+    result.trim_end().to_string()
+}
+
+/// Render a markdown table as an ASCII table inside <pre>.
+/// Skips separator rows (---|---).
+fn render_table(rows: &[&str]) -> String {
+    let parsed: Vec<Vec<String>> = rows
+        .iter()
+        .filter(|row| !is_table_separator(row))
+        .map(|row| {
+            let trimmed = row.trim().trim_matches('|');
+            trimmed
+                .split('|')
+                .map(|cell| cell.trim().to_string())
+                .collect()
+        })
+        .collect();
+
+    if parsed.is_empty() {
+        return String::new();
+    }
+
+    let num_cols = parsed.iter().map(|r| r.len()).max().unwrap_or(0);
+    let mut widths = vec![0usize; num_cols];
+    for row in &parsed {
+        for (i, cell) in row.iter().enumerate() {
+            if i < num_cols {
+                widths[i] = widths[i].max(cell.len());
+            }
+        }
+    }
+
+    let mut out = String::from("<pre>");
+    for (idx, row) in parsed.iter().enumerate() {
+        let cells: Vec<String> = (0..num_cols)
+            .map(|i| {
+                let cell = row.get(i).map(|s| s.as_str()).unwrap_or("");
+                format!("{:<width$}", cell, width = widths[i])
+            })
+            .collect();
+        out.push_str(&html_escape(&cells.join(" │ ")));
+        out.push('\n');
+        // Separator after header row
+        if idx == 0 && parsed.len() > 1 {
+            let sep: String = widths
+                .iter()
+                .map(|&w| "─".repeat(w))
+                .collect::<Vec<_>>()
+                .join("─┼─");
+            out.push_str(&html_escape(&sep));
+            out.push('\n');
+        }
+    }
+    out.push_str("</pre>");
+    out
+}
+
+fn is_table_separator(row: &str) -> bool {
+    row.trim()
+        .trim_matches('|')
+        .split('|')
+        .all(|cell| cell.trim().chars().all(|c| c == '-' || c == ':' || c == ' '))
+        && row.contains('-')
+}
+
+/// Apply inline Markdown formatting to a single line of text.
+/// Handles: **bold**, *italic*, ~~strikethrough~~, `code`.
+fn inline_to_html(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
 
     while let Some(ch) = chars.next() {
-        // Code block: ```...```
-        if ch == '`' && chars.peek() == Some(&'`') {
-            let mut backticks = 1usize;
-            while chars.peek() == Some(&'`') {
-                chars.next();
-                backticks += 1;
-            }
-            if backticks >= 3 {
-                // Consume optional language hint on the same line
-                let mut code = String::new();
-                let mut first_newline = true;
-                while let Some(c) = chars.next() {
-                    if first_newline && c != '\n' {
-                        continue; // skip language hint
-                    }
-                    first_newline = false;
-                    // Check for closing ```
-                    if c == '`' {
-                        let mut close = 1usize;
-                        while chars.peek() == Some(&'`') {
-                            chars.next();
-                            close += 1;
-                        }
-                        if close >= 3 {
-                            break;
-                        }
-                        code.push_str(&"`".repeat(close));
-                        continue;
-                    }
-                    code.push(c);
-                }
-                result.push_str("<pre>");
-                result.push_str(&html_escape(code.trim()));
-                result.push_str("</pre>");
-                continue;
-            }
-            // Not a triple backtick — treat as inline code
-            result.push('`');
-            continue;
-        }
-
         // Inline code: `...`
         if ch == '`' {
             let mut code = String::new();
@@ -615,9 +734,33 @@ pub fn markdown_to_html(text: &str) -> String {
             continue;
         }
 
+        // Strikethrough: ~~...~~
+        if ch == '~' && chars.peek() == Some(&'~') {
+            chars.next();
+            let mut inner = String::new();
+            let mut closed = false;
+            while let Some(c) = chars.next() {
+                if c == '~' && chars.peek() == Some(&'~') {
+                    chars.next();
+                    closed = true;
+                    break;
+                }
+                inner.push(c);
+            }
+            if closed {
+                result.push_str("<s>");
+                result.push_str(&html_escape(&inner));
+                result.push_str("</s>");
+            } else {
+                result.push_str("~~");
+                result.push_str(&html_escape(&inner));
+            }
+            continue;
+        }
+
         // Bold: **...**
         if ch == '*' && chars.peek() == Some(&'*') {
-            chars.next(); // consume second *
+            chars.next();
             let mut inner = String::new();
             let mut closed = false;
             while let Some(c) = chars.next() {
@@ -661,7 +804,6 @@ pub fn markdown_to_html(text: &str) -> String {
             continue;
         }
 
-        // Plain text — escape HTML special chars
         result.push_str(&html_escape_char(ch));
     }
 
@@ -712,6 +854,47 @@ mod tests {
         let out = markdown_to_html(input);
         assert!(out.contains("<b>issue #42</b>"));
         assert!(out.contains("<code>bus.rs</code>"));
+    }
+
+    #[test]
+    fn test_markdown_to_html_headers() {
+        assert!(markdown_to_html("# Title").contains("<b>▶ Title</b>"));
+        assert!(markdown_to_html("## Sub").contains("<b>▸ Sub</b>"));
+        assert!(markdown_to_html("### Deep").contains("<b>• Deep</b>"));
+    }
+
+    #[test]
+    fn test_markdown_to_html_horizontal_rule() {
+        assert!(markdown_to_html("---").contains("─────"));
+        assert!(markdown_to_html("***").contains("─────"));
+    }
+
+    #[test]
+    fn test_markdown_to_html_strikethrough() {
+        assert_eq!(markdown_to_html("~~gone~~"), "<s>gone</s>");
+    }
+
+    #[test]
+    fn test_markdown_to_html_blockquote() {
+        assert!(markdown_to_html("> note").contains("<blockquote>note</blockquote>"));
+    }
+
+    #[test]
+    fn test_markdown_to_html_table() {
+        let input = "| Name | Value |\n|------|-------|\n| foo  | bar   |";
+        let out = markdown_to_html(input);
+        assert!(out.contains("<pre>"));
+        assert!(out.contains("Name"));
+        assert!(out.contains("foo"));
+        assert!(out.contains("─"));
+    }
+
+    #[test]
+    fn test_markdown_to_html_code_block() {
+        let input = "```\nlet x = 1;\n```";
+        let out = markdown_to_html(input);
+        assert!(out.contains("<pre>"));
+        assert!(out.contains("let x = 1;"));
     }
 
     #[test]
