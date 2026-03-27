@@ -131,7 +131,10 @@ impl EventHandler for DiscordHandler {
 
         // Whitelist check.
         if !self.allowed_channels.is_empty() && !self.allowed_channels.contains(&channel_id) {
-            debug!(channel_id = channel_id, "ignoring discord message — channel not in whitelist");
+            debug!(
+                channel_id = channel_id,
+                "ignoring discord message — channel not in whitelist"
+            );
             return;
         }
 
