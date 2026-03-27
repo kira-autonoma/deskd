@@ -167,13 +167,12 @@ pub async fn run(
             .map(|t| t as u32);
 
         // Determine reply target: workflow engine tasks route back to sm:<id>.
-        let reply_target = if let Some(sm_id) =
-            msg.payload.get("sm_instance_id").and_then(|v| v.as_str())
-        {
-            format!("sm:{}", sm_id)
-        } else {
-            msg.reply_to.as_deref().unwrap_or(&msg.source).to_string()
-        };
+        let reply_target =
+            if let Some(sm_id) = msg.payload.get("sm_instance_id").and_then(|v| v.as_str()) {
+                format!("sm:{}", sm_id)
+            } else {
+                msg.reply_to.as_deref().unwrap_or(&msg.source).to_string()
+            };
         let is_telegram = reply_target.starts_with("telegram.out:");
         let telegram_chat_id = if is_telegram {
             reply_target
