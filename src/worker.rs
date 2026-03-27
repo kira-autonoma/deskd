@@ -200,12 +200,10 @@ pub async fn run(
             let progress_writer = writer.clone();
             let progress_name = name.to_string();
             let progress_ctrl = ctrl_target.clone();
-            let (progress_cancel_tx, mut progress_cancel_rx) =
-                tokio::sync::oneshot::channel::<()>();
+            let (progress_cancel_tx, mut progress_cancel_rx) = tokio::sync::oneshot::channel::<()>();
 
             tokio::spawn(async move {
-                let mut interval =
-                    tokio::time::interval(std::time::Duration::from_secs(5));
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
                 interval.tick().await; // skip first immediate tick
                 loop {
                     tokio::select! {

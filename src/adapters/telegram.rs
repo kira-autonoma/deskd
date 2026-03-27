@@ -345,9 +345,7 @@ async fn outbound_sender(bot: Bot, mut rx: mpsc::UnboundedReceiver<OutboundCmd>)
             }
             OutboundCmd::ProgressUpdate { chat_id, text } => {
                 if let Some(&msg_id) = progress_ids.get(&chat_id) {
-                    let _ = bot
-                        .edit_message_text(ChatId(chat_id), msg_id, text)
-                        .await;
+                    let _ = bot.edit_message_text(ChatId(chat_id), msg_id, text).await;
                 }
             }
             OutboundCmd::ProgressDone(chat_id) => {
