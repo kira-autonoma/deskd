@@ -54,6 +54,28 @@ pub struct TelegramConfig {
     pub token: String,
 }
 
+/// Discord bot adapter config. Defined per-agent in workspace.yaml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscordConfig {
+    /// Bot token from Discord Developer Portal. Typically set via ${DISCORD_BOT_TOKEN}.
+    pub token: String,
+}
+
+/// Discord channel routing config in the per-user deskd.yaml.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscordRoutesConfig {
+    pub routes: Vec<DiscordRoute>,
+}
+
+/// A single Discord channel route.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscordRoute {
+    /// Discord channel ID (u64).
+    pub channel_id: u64,
+    /// Human-readable name for this channel, shown to the agent as context.
+    pub name: Option<String>,
+}
+
 /// Definition of a top-level agent in workspace.yaml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentDef {
@@ -67,6 +89,9 @@ pub struct AgentDef {
     /// Telegram bot for this agent. When set, a Telegram adapter is started
     /// on the agent's bus when deskd serves this workspace.
     pub telegram: Option<TelegramConfig>,
+    /// Discord bot for this agent. When set, a Discord adapter is started
+    /// on the agent's bus when deskd serves this workspace.
+    pub discord: Option<DiscordConfig>,
     /// Claude model override. Default is set in the agent's deskd.yaml.
     #[serde(default)]
     pub model: Option<String>,
@@ -135,6 +160,8 @@ pub struct UserConfig {
     pub agents: Vec<SubAgentDef>,
     /// Telegram channel routing for this agent.
     pub telegram: Option<TelegramRoutesConfig>,
+    /// Discord channel routing for this agent.
+    pub discord: Option<DiscordRoutesConfig>,
     /// Scheduled actions (cron → bus messages).
     #[serde(default)]
     pub schedules: Vec<ScheduleDef>,
@@ -384,6 +411,7 @@ agents:
             work_dir: "/home/kira".into(),
             config: None,
             telegram: None,
+            discord: None,
             model: None,
             command: vec!["claude".into()],
             budget_usd: 50.0,
@@ -400,6 +428,7 @@ agents:
             work_dir: "/home/kira".into(),
             config: Some("/etc/agents/kira.yaml".into()),
             telegram: None,
+            discord: None,
             model: None,
             command: vec!["claude".into()],
             budget_usd: 50.0,
@@ -493,6 +522,7 @@ schedules:
                     name: None,
                 }],
             }),
+            discord: None,
             schedules: vec![],
             mcp_config: None,
         };

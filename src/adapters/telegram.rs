@@ -18,6 +18,48 @@ use tokio::time::Duration;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::config::TelegramRoute;
+
+pub struct TelegramAdapter {
+    token: String,
+    routes: Vec<TelegramRoute>,
+}
+
+impl TelegramAdapter {
+    pub fn new(token: String, routes: Vec<TelegramRoute>) -> Self {
+        Self { token, routes }
+    }
+}
+
+impl super::Adapter for TelegramAdapter {
+    fn name(&self) -> &str {
+        "telegram"
+    }
+
+    fn run(self: Box<Self>, bus_socket: String, agent_name: String) -> super::BoxFuture {
+        let allowed_chats = self.routes.iter().map(|r| r.chat_id).collect();
+        let mention_only = self
+            .routes
+            .iter()
+            .filter(|r| r.mention_only)
+            .map(|r| r.chat_id)
+            .collect();
+        let chat_names = self
+            .routes
+            .iter()
+            .filter_map(|r| r.name.as_ref().map(|n| (r.chat_id, n.clone())))
+            .collect();
+        Box::pin(run(
+            self.token,
+            bus_socket,
+            agent_name,
+            allowed_chats,
+            mention_only,
+            chat_names,
+        ))
+    }
+}
+
 enum OutboundCmd {
     Text { chat_id: i64, text: String },
     TypingStart(i64),

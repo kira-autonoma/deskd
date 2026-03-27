@@ -428,41 +428,14 @@ async fn serve(config_path: String) -> anyhow::Result<()> {
         }
         info!(agent = %name, bus = %bus_socket, "started agent bus");
 
-        // Start Telegram adapter if configured.
-        // Publishes telegram.in:<chat_id> for incoming messages.
-        // Subscribes to telegram.out:* for outgoing replies.
-        if let Some(ref tg) = def.telegram {
-            let token = tg.token.clone();
+        // Start configured adapters (Telegram, Discord, etc.).
+        for adapter in adapters::build_adapters(&def, user_cfg.as_ref()) {
             let bus = bus_socket.clone();
             let agent_name = name.clone();
-            let routes = user_cfg
-                .as_ref()
-                .and_then(|c| c.telegram.as_ref())
-                .map(|t| t.routes.clone())
-                .unwrap_or_default();
-            let allowed_chats: std::collections::HashSet<i64> =
-                routes.iter().map(|r| r.chat_id).collect();
-            let mention_only_chats: Vec<i64> = routes
-                .iter()
-                .filter(|r| r.mention_only)
-                .map(|r| r.chat_id)
-                .collect();
-            let chat_names: std::collections::HashMap<i64, String> = routes
-                .iter()
-                .filter_map(|r| r.name.as_ref().map(|n| (r.chat_id, n.clone())))
-                .collect();
+            let adapter_name = adapter.name().to_string();
             tokio::spawn(async move {
-                if let Err(e) = adapters::telegram::run(
-                    token,
-                    bus,
-                    agent_name.clone(),
-                    allowed_chats,
-                    mention_only_chats,
-                    chat_names,
-                )
-                .await
-                {
-                    tracing::error!(agent = %agent_name, error = %e, "telegram adapter failed");
+                if let Err(e) = adapter.run(bus, agent_name).await {
+                    tracing::error!(adapter = %adapter_name, error = %e, "adapter failed");
                 }
             });
         }
