@@ -5,10 +5,12 @@
 ///
 /// Supported actions:
 ///   raw         — post a static `task` payload to the target
-///   github_poll — shell out to `gh issue list`, post new issues to target
+///   github_poll — poll GitHub API for issues/comments, post new events to target
 use anyhow::{Context, Result};
 use chrono::Utc;
 use cron::Schedule;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::str::FromStr;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
@@ -143,9 +145,16 @@ async fn fire_raw(def: &ScheduleDef, bus_socket: &str, agent_name: &str) -> Resu
     post_to_bus(bus_socket, agent_name, &def.target, text).await
 }
 
-/// Poll GitHub for issues with a configured label, post new ones to the bus.
-/// Config fields: `repos` (list of "owner/repo"), `label` (string).
-/// Tracks seen issue numbers in memory (resets on restart).
+/// Poll GitHub for issues and comments, post new events to the bus.
+///
+/// Config fields:
+///   `repos`  — list of "owner/repo" strings
+///   `label`  — filter issues by label (empty string = no filter)
+///   `events` — list of event types: "issues", "issue_comments"
+///              (default: ["issues"] for backward compatibility)
+///
+/// Uses `~/.deskd/github_poll_since.json` to track the last poll time per repo,
+/// so only new/updated items are posted on each cycle.
 async fn fire_github_poll(def: &ScheduleDef, bus_socket: &str, agent_name: &str) -> Result<()> {
     let cfg = match &def.config {
         Some(c) => c,
@@ -166,65 +175,215 @@ async fn fire_github_poll(def: &ScheduleDef, bus_socket: &str, agent_name: &str)
         })
         .unwrap_or_default();
 
-    let label = cfg
-        .get("label")
-        .and_then(|l| l.as_str())
-        .unwrap_or("agent-ready");
+    let label = cfg.get("label").and_then(|l| l.as_str()).unwrap_or("");
+
+    let events = parse_events(cfg);
+
+    let mut since_state = load_since_state();
 
     for repo in &repos {
-        match fetch_github_issues(repo, label).await {
-            Ok(issues) => {
-                for issue in issues {
-                    let title = issue.get("title").and_then(|t| t.as_str()).unwrap_or("");
-                    let number = issue.get("number").and_then(|n| n.as_u64()).unwrap_or(0);
-                    let body = issue.get("body").and_then(|b| b.as_str()).unwrap_or("");
-                    let url = issue.get("url").and_then(|u| u.as_str()).unwrap_or("");
+        let since = since_state.get(repo).cloned().unwrap_or_else(|| {
+            (Utc::now() - chrono::Duration::minutes(5))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        });
 
-                    let text = format!("GitHub issue {repo}#{number}: {title}\n{url}\n\n{body}");
-                    info!(agent = %agent_name, repo = %repo, issue = number, "posting github issue to bus");
-                    if let Err(e) = post_to_bus(bus_socket, agent_name, &def.target, &text).await {
-                        warn!(error = %e, "failed to post github issue to bus");
-                    }
+        let mut count = 0;
+        let mut had_error = false;
+
+        if events.contains(&"issues".to_string()) {
+            match poll_issues(repo, label, &since, bus_socket, agent_name, &def.target).await {
+                Ok(n) => count += n,
+                Err(e) => {
+                    warn!(agent = %agent_name, repo = %repo, error = %e, "github_poll issues failed");
+                    had_error = true;
                 }
             }
-            Err(e) => {
-                warn!(agent = %agent_name, repo = %repo, error = %e, "github_poll failed");
+        }
+
+        if events.contains(&"issue_comments".to_string()) {
+            match poll_issue_comments(repo, &since, bus_socket, agent_name, &def.target).await {
+                Ok(n) => count += n,
+                Err(e) => {
+                    warn!(agent = %agent_name, repo = %repo, error = %e, "github_poll issue_comments failed");
+                    had_error = true;
+                }
             }
+        }
+
+        // Only update since timestamp if all polls succeeded — otherwise retry next cycle.
+        if !had_error {
+            since_state.insert(
+                repo.clone(),
+                Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            );
+        }
+
+        if count > 0 {
+            info!(agent = %agent_name, repo = %repo, events = count, "github_poll posted events");
         }
     }
 
+    save_since_state(&since_state);
     Ok(())
 }
 
-/// Shell out to `gh issue list` to fetch open issues with the given label.
-async fn fetch_github_issues(repo: &str, label: &str) -> Result<Vec<serde_json::Value>> {
+/// Parse the `events` array from github_poll config.
+/// Default: `["issues"]` for backward compatibility.
+fn parse_events(cfg: &serde_yaml::Value) -> Vec<String> {
+    cfg.get("events")
+        .and_then(|e| e.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_else(|| vec!["issues".to_string()])
+}
+
+/// Poll GitHub issues API with `since` filter, post new/updated issues to bus.
+/// Returns the number of events posted.
+async fn poll_issues(
+    repo: &str,
+    label: &str,
+    since: &str,
+    bus_socket: &str,
+    agent_name: &str,
+    target: &str,
+) -> Result<usize> {
+    let mut endpoint = format!(
+        "repos/{}/issues?state=open&since={}&per_page=100&sort=updated&direction=desc",
+        repo, since
+    );
+    if !label.is_empty() {
+        endpoint.push_str(&format!("&labels={}", label));
+    }
+
     let output = tokio::process::Command::new("gh")
-        .args([
-            "issue",
-            "list",
-            "--repo",
-            repo,
-            "--label",
-            label,
-            "--state",
-            "open",
-            "--json",
-            "title,body,number,url",
-            "--limit",
-            "10",
-        ])
+        .args(["api", &endpoint])
         .output()
         .await
-        .context("failed to run gh")?;
+        .context("failed to run gh api for issues")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("gh issue list failed: {}", stderr.trim());
+        anyhow::bail!("gh api issues failed: {}", stderr.trim());
     }
 
-    let issues: Vec<serde_json::Value> =
-        serde_json::from_slice(&output.stdout).context("failed to parse gh output")?;
-    Ok(issues)
+    let items: Vec<serde_json::Value> =
+        serde_json::from_slice(&output.stdout).context("failed to parse gh api issues output")?;
+
+    let mut count = 0;
+    for item in items {
+        // GitHub issues API returns PRs too — filter them out
+        if item.get("pull_request").is_some() {
+            continue;
+        }
+
+        let title = item.get("title").and_then(|t| t.as_str()).unwrap_or("");
+        let number = item.get("number").and_then(|n| n.as_u64()).unwrap_or(0);
+        let body = item.get("body").and_then(|b| b.as_str()).unwrap_or("");
+        let html_url = item.get("html_url").and_then(|u| u.as_str()).unwrap_or("");
+
+        let text = format!("GitHub issue {repo}#{number}: {title}\n{html_url}\n\n{body}");
+        info!(agent = %agent_name, repo = %repo, issue = number, "posting github issue to bus");
+        if let Err(e) = post_to_bus(bus_socket, agent_name, target, &text).await {
+            warn!(error = %e, "failed to post github issue to bus");
+        }
+        count += 1;
+    }
+
+    Ok(count)
+}
+
+/// Poll GitHub issue comments API with `since` filter, post new comments to bus.
+/// Returns the number of events posted.
+async fn poll_issue_comments(
+    repo: &str,
+    since: &str,
+    bus_socket: &str,
+    agent_name: &str,
+    target: &str,
+) -> Result<usize> {
+    let endpoint = format!(
+        "repos/{}/issues/comments?since={}&per_page=100&sort=updated&direction=desc",
+        repo, since
+    );
+
+    let output = tokio::process::Command::new("gh")
+        .args(["api", &endpoint])
+        .output()
+        .await
+        .context("failed to run gh api for issue comments")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("gh api issue comments failed: {}", stderr.trim());
+    }
+
+    let comments: Vec<serde_json::Value> =
+        serde_json::from_slice(&output.stdout).context("failed to parse gh api comments output")?;
+
+    let mut count = 0;
+    for comment in comments {
+        let user = comment
+            .get("user")
+            .and_then(|u| u.get("login"))
+            .and_then(|l| l.as_str())
+            .unwrap_or("unknown");
+        let body = comment.get("body").and_then(|b| b.as_str()).unwrap_or("");
+        let html_url = comment
+            .get("html_url")
+            .and_then(|u| u.as_str())
+            .unwrap_or("");
+
+        // Extract issue number from issue_url (e.g. "https://api.github.com/repos/owner/repo/issues/42")
+        let issue_number = comment
+            .get("issue_url")
+            .and_then(|u| u.as_str())
+            .and_then(|url| url.rsplit('/').next())
+            .unwrap_or("?");
+
+        let text =
+            format!("GitHub comment on {repo}#{issue_number} by {user}:\n{html_url}\n\n{body}");
+        info!(agent = %agent_name, repo = %repo, issue = %issue_number, user = %user, "posting github comment to bus");
+        if let Err(e) = post_to_bus(bus_socket, agent_name, target, &text).await {
+            warn!(error = %e, "failed to post github comment to bus");
+        }
+        count += 1;
+    }
+
+    Ok(count)
+}
+
+// ─── Since state persistence ────────────────────────────────────────────────
+
+/// Path to the since-state file: `~/.deskd/github_poll_since.json`
+fn since_state_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    PathBuf::from(home)
+        .join(".deskd")
+        .join("github_poll_since.json")
+}
+
+/// Load the per-repo since timestamps from disk.
+fn load_since_state() -> HashMap<String, String> {
+    let path = since_state_path();
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Persist the per-repo since timestamps to disk.
+fn save_since_state(state: &HashMap<String, String>) {
+    let path = since_state_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(state) {
+        let _ = std::fs::write(&path, json);
+    }
 }
 
 /// Run an arbitrary shell command via `sh -c`.
@@ -303,4 +462,50 @@ async fn post_to_bus(socket_path: &str, agent_name: &str, target: &str, text: &s
     stream.write_all(msg_line.as_bytes()).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_events_default() {
+        let cfg: serde_yaml::Value = serde_yaml::from_str("repos: []").unwrap();
+        let events = parse_events(&cfg);
+        assert_eq!(events, vec!["issues".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_events_explicit() {
+        let cfg: serde_yaml::Value =
+            serde_yaml::from_str("events: [issues, issue_comments]").unwrap();
+        let events = parse_events(&cfg);
+        assert_eq!(events, vec!["issues", "issue_comments"]);
+    }
+
+    #[test]
+    fn test_parse_events_single() {
+        let cfg: serde_yaml::Value = serde_yaml::from_str("events: [issue_comments]").unwrap();
+        let events = parse_events(&cfg);
+        assert_eq!(events, vec!["issue_comments"]);
+    }
+
+    #[test]
+    fn test_since_state_roundtrip() {
+        let dir = std::env::temp_dir().join("deskd_test_since");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("github_poll_since.json");
+
+        let mut state = HashMap::new();
+        state.insert("owner/repo".to_string(), "2026-03-27T10:00:00Z".to_string());
+
+        let json = serde_json::to_string_pretty(&state).unwrap();
+        std::fs::write(&path, &json).unwrap();
+
+        let loaded: HashMap<String, String> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(loaded.get("owner/repo").unwrap(), "2026-03-27T10:00:00Z");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
