@@ -19,6 +19,25 @@ pub fn log_dir() -> PathBuf {
     dir
 }
 
+/// Where one-shot reminder JSON files are stored.
+pub fn reminders_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let dir = PathBuf::from(home).join(".deskd").join("reminders");
+    std::fs::create_dir_all(&dir).ok();
+    dir
+}
+
+/// A one-shot reminder that fires at a specific time and posts a message to the bus.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemindDef {
+    /// ISO 8601 timestamp at which to fire.
+    pub at: String,
+    /// Bus target (e.g. `agent:kira`).
+    pub target: String,
+    /// Payload text to post.
+    pub message: String,
+}
+
 /// Derive the bus socket path for an agent from its work directory.
 /// Convention: {work_dir}/.deskd/bus.sock
 pub fn agent_bus_socket(work_dir: &str) -> String {

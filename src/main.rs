@@ -10,6 +10,7 @@ mod statemachine;
 mod worker;
 mod workflow;
 
+use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 use tracing::info;
 
@@ -69,6 +70,31 @@ enum Commands {
         config: String,
         #[command(subcommand)]
         action: SmAction,
+    },
+    /// Schedule a one-shot reminder for an agent.
+    ///
+    /// Writes a RemindDef JSON to ~/.deskd/reminders/<uuid>.json.
+    /// The reminder runner (part of `deskd serve`) will fire it when due.
+    ///
+    /// Examples:
+    ///   deskd remind kira --in 30m "Check PR status"
+    ///   deskd remind kira --in 2h30m "Stand-up time"
+    ///   deskd remind kira --at 2026-03-27T15:00:00Z "Deploy window opens"
+    ///   deskd remind kira --in 1h --target queue:reviews "Review queue check"
+    Remind {
+        /// Agent name. Used as bus target `agent:<name>` unless --target is given.
+        name: String,
+        /// Duration from now (e.g. 30m, 1h, 2h30m, 90s). Mutually exclusive with --at.
+        #[arg(long, conflicts_with = "at")]
+        r#in: Option<String>,
+        /// Absolute ISO 8601 timestamp. Mutually exclusive with --in.
+        #[arg(long, conflicts_with = "in")]
+        at: Option<String>,
+        /// Override bus target (default: agent:<name>).
+        #[arg(long)]
+        target: Option<String>,
+        /// Message payload to deliver.
+        message: String,
     },
 }
 
@@ -488,6 +514,15 @@ async fn main() -> anyhow::Result<()> {
         } => {
             let user_cfg = config::UserConfig::load(&config_path)?;
             handle_sm(action, &user_cfg)?;
+        }
+        Commands::Remind {
+            name,
+            r#in: duration_str,
+            at,
+            target,
+            message,
+        } => {
+            handle_remind(name, duration_str, at, target, message)?;
         }
         Commands::Status {
             config: config_path,
@@ -948,6 +983,113 @@ async fn upgrade(install_dir_override: Option<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Parse a simple duration string into total seconds.
+///
+/// Supported formats:
+///   `30m`    → 1800 seconds
+///   `1h`     → 3600 seconds
+///   `2h30m`  → 9000 seconds
+///   `90s`    → 90 seconds
+///   Combined forms: `1h30m`, `2h15m30s`, etc.
+fn parse_duration_secs(s: &str) -> anyhow::Result<u64> {
+    let mut total: u64 = 0;
+    let mut current_num = String::new();
+    let mut found_any = false;
+
+    for ch in s.chars() {
+        if ch.is_ascii_digit() {
+            current_num.push(ch);
+        } else {
+            let n: u64 = if current_num.is_empty() {
+                anyhow::bail!("expected number before '{}' in duration '{}'", ch, s)
+            } else {
+                current_num
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("invalid number in duration '{}'", s))?
+            };
+            current_num.clear();
+
+            match ch {
+                'h' => {
+                    total += n * 3600;
+                    found_any = true;
+                }
+                'm' => {
+                    total += n * 60;
+                    found_any = true;
+                }
+                's' => {
+                    total += n;
+                    found_any = true;
+                }
+                other => {
+                    anyhow::bail!("unknown unit '{}' in duration '{}' (use h, m, s)", other, s)
+                }
+            }
+        }
+    }
+
+    if !current_num.is_empty() {
+        anyhow::bail!(
+            "trailing number '{}' without unit in duration '{}' (use h, m, s)",
+            current_num,
+            s
+        );
+    }
+    if !found_any {
+        anyhow::bail!(
+            "empty or invalid duration '{}' — expected e.g. 30m, 1h, 2h30m, 90s",
+            s
+        );
+    }
+
+    Ok(total)
+}
+
+/// Handle `deskd remind <name> [--in <dur> | --at <ts>] [--target <t>] "<message>"`.
+fn handle_remind(
+    name: String,
+    duration_str: Option<String>,
+    at: Option<String>,
+    target_override: Option<String>,
+    message: String,
+) -> anyhow::Result<()> {
+    let fire_at: chrono::DateTime<chrono::Utc> = if let Some(ref dur) = duration_str {
+        let secs = parse_duration_secs(dur)?;
+        chrono::Utc::now() + chrono::Duration::seconds(secs as i64)
+    } else if let Some(ref ts) = at {
+        chrono::DateTime::parse_from_rfc3339(ts)
+            .with_context(|| format!("invalid --at timestamp '{}' (expected ISO 8601)", ts))?
+            .with_timezone(&chrono::Utc)
+    } else {
+        anyhow::bail!("either --in <duration> or --at <timestamp> is required");
+    };
+
+    let target = target_override.unwrap_or_else(|| format!("agent:{}", name));
+
+    let remind = config::RemindDef {
+        at: fire_at.to_rfc3339(),
+        target: target.clone(),
+        message,
+    };
+
+    let dir = config::reminders_dir();
+    let filename = format!("{}.json", uuid::Uuid::new_v4());
+    let path = dir.join(&filename);
+
+    let json = serde_json::to_string_pretty(&remind).context("failed to serialize reminder")?;
+    std::fs::write(&path, json).with_context(|| format!("failed to write {}", path.display()))?;
+
+    println!(
+        "Reminder scheduled: target={} at={} file={}",
+        target,
+        fire_at.to_rfc3339(),
+        path.display()
+    );
+
+    Ok(())
+}
+
 /// Format a chrono::Duration as a human-readable relative time string (e.g. "5m", "2h", "3d").
 fn format_relative_time(dur: chrono::Duration) -> String {
     let secs = dur.num_seconds();
@@ -1026,6 +1168,16 @@ async fn serve(config_path: String) -> anyhow::Result<()> {
                 schedule::watch_and_reload(config, bus, agent_name).await;
             });
             info!(agent = %name, "started schedule watcher");
+        }
+
+        // Start reminder runner — fires one-shot reminders from ~/.deskd/reminders/.
+        {
+            let bus = bus_socket.clone();
+            let agent_name = name.clone();
+            tokio::spawn(async move {
+                schedule::run_reminders(bus, agent_name).await;
+            });
+            info!(agent = %name, "started reminder runner");
         }
 
         // Start worker on the agent's bus.
@@ -1158,4 +1310,96 @@ async fn query_live_agents(socket: &str) -> anyhow::Result<std::collections::Has
     .await;
 
     result.unwrap_or(Ok(Default::default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_duration_seconds() {
+        assert_eq!(parse_duration_secs("90s").unwrap(), 90);
+    }
+
+    #[test]
+    fn test_parse_duration_minutes() {
+        assert_eq!(parse_duration_secs("30m").unwrap(), 30 * 60);
+    }
+
+    #[test]
+    fn test_parse_duration_hours() {
+        assert_eq!(parse_duration_secs("1h").unwrap(), 3600);
+    }
+
+    #[test]
+    fn test_parse_duration_combined() {
+        assert_eq!(parse_duration_secs("2h30m").unwrap(), 2 * 3600 + 30 * 60);
+    }
+
+    #[test]
+    fn test_parse_duration_full() {
+        assert_eq!(
+            parse_duration_secs("1h15m30s").unwrap(),
+            3600 + 15 * 60 + 30
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_invalid_unit() {
+        assert!(parse_duration_secs("5d").is_err());
+    }
+
+    #[test]
+    fn test_parse_duration_empty() {
+        assert!(parse_duration_secs("").is_err());
+    }
+
+    #[test]
+    fn test_parse_duration_trailing_number() {
+        assert!(parse_duration_secs("30").is_err());
+    }
+
+    #[test]
+    fn test_handle_remind_writes_file() {
+        // Use a unique temp directory under /tmp to avoid polluting ~/.deskd.
+        let tmp_dir = std::path::PathBuf::from(format!(
+            "/tmp/deskd-test-remind-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        // Override HOME so reminders_dir() writes to our temp dir.
+        unsafe {
+            std::env::set_var("HOME", &tmp_dir);
+        }
+
+        handle_remind(
+            "kira".to_string(),
+            Some("30m".to_string()),
+            None,
+            None,
+            "test reminder".to_string(),
+        )
+        .unwrap();
+
+        let remind_dir = tmp_dir.join(".deskd").join("reminders");
+        let files: Vec<_> = std::fs::read_dir(&remind_dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+            .collect();
+
+        assert_eq!(files.len(), 1, "expected exactly one reminder file");
+
+        let content = std::fs::read_to_string(files[0].path()).unwrap();
+        let parsed: config::RemindDef = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed.target, "agent:kira");
+        assert_eq!(parsed.message, "test reminder");
+
+        // Cleanup.
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
 }

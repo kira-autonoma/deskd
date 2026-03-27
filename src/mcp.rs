@@ -255,6 +255,29 @@ fn handle_tools_list(
         }),
     ];
 
+    tools.push(json!({
+        "name": "create_reminder",
+        "description": "Schedule a one-shot reminder. The message will be posted to the bus target after delay_minutes minutes.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "description": "Bus target to deliver the reminder to (e.g. agent:kira, telegram.out:-1234)"
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Message payload to deliver when the reminder fires"
+                },
+                "delay_minutes": {
+                    "type": "number",
+                    "description": "Number of minutes from now to fire the reminder"
+                }
+            },
+            "required": ["target", "message", "delay_minutes"]
+        }
+    }));
+
     // Add state machine tools if models are defined.
     if user_config.map(|c| !c.models.is_empty()).unwrap_or(false) {
         tools.push(json!({
@@ -316,6 +339,7 @@ async fn handle_tools_call(
     match name {
         "send_message" => call_send_message(args, agent_name, bus_socket, user_config).await,
         "add_persistent_agent" => call_add_persistent_agent(args, agent_name, bus_socket).await,
+        "create_reminder" => call_create_reminder(args).await,
         "sm_create" => call_sm_create(args, agent_name, bus_socket, user_config).await,
         "sm_move" => call_sm_move(args, agent_name, bus_socket, user_config).await,
         "sm_query" => call_sm_query(args).await,
@@ -478,6 +502,55 @@ async fn call_add_persistent_agent(
             "text": format!(
                 "Agent '{}' started on bus {}. Subscriptions: {}",
                 name, bus_socket, subscribe_display
+            )
+        }],
+        "isError": false
+    }))
+}
+
+// ─── Reminder tool implementation ─────────────────────────────────────────────
+
+async fn call_create_reminder(args: &Value) -> Result<Value> {
+    let target = args
+        .get("target")
+        .and_then(|t| t.as_str())
+        .context("missing target")?;
+    let message = args
+        .get("message")
+        .and_then(|m| m.as_str())
+        .context("missing message")?;
+    let delay_minutes = args
+        .get("delay_minutes")
+        .and_then(|d| d.as_f64())
+        .context("missing delay_minutes")?;
+
+    let fire_at =
+        chrono::Utc::now() + chrono::Duration::seconds((delay_minutes * 60.0).round() as i64);
+
+    let remind = crate::config::RemindDef {
+        at: fire_at.to_rfc3339(),
+        target: target.to_string(),
+        message: message.to_string(),
+    };
+
+    let dir = crate::config::reminders_dir();
+    let filename = format!("{}.json", uuid::Uuid::new_v4());
+    let path = dir.join(&filename);
+
+    let json = serde_json::to_string_pretty(&remind).context("failed to serialize reminder")?;
+    std::fs::write(&path, json)
+        .with_context(|| format!("failed to write reminder file: {}", path.display()))?;
+
+    info!(target = %target, at = %fire_at, "create_reminder via MCP");
+
+    Ok(json!({
+        "content": [{
+            "type": "text",
+            "text": format!(
+                "Reminder scheduled: target={} at={} (in {:.0} minutes)",
+                target,
+                fire_at.to_rfc3339(),
+                delay_minutes
             )
         }],
         "isError": false

@@ -434,6 +434,82 @@ async fn fire_shell(def: &ScheduleDef, bus_socket: &str, agent_name: &str) -> Re
     Ok(())
 }
 
+/// Scan `~/.deskd/reminders/` every 10 seconds and fire any due reminders.
+///
+/// Each reminder is a JSON file (`RemindDef`) written by `deskd remind` or the
+/// `create_reminder` MCP tool. When the `at` timestamp is <= now, the reminder
+/// is fired (message posted to bus) and the file is deleted.
+pub async fn run_reminders(bus_socket: String, agent_name: String) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+        let dir = crate::config::reminders_dir();
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(agent = %agent_name, error = %e, "failed to read reminders dir");
+                continue;
+            }
+        };
+
+        let now = Utc::now();
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(agent = %agent_name, path = %path.display(), error = %e, "failed to read reminder file");
+                    continue;
+                }
+            };
+
+            let reminder: crate::config::RemindDef = match serde_json::from_str(&content) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(agent = %agent_name, path = %path.display(), error = %e, "failed to parse reminder file");
+                    continue;
+                }
+            };
+
+            let fire_at = match chrono::DateTime::parse_from_rfc3339(&reminder.at) {
+                Ok(t) => t.with_timezone(&chrono::Utc),
+                Err(e) => {
+                    warn!(agent = %agent_name, path = %path.display(), error = %e, "invalid reminder timestamp");
+                    continue;
+                }
+            };
+
+            if fire_at > now {
+                // Not yet due.
+                continue;
+            }
+
+            info!(agent = %agent_name, target = %reminder.target, "firing reminder");
+
+            if let Err(e) = post_to_bus(
+                &bus_socket,
+                &agent_name,
+                &reminder.target,
+                &reminder.message,
+            )
+            .await
+            {
+                warn!(agent = %agent_name, target = %reminder.target, error = %e, "failed to fire reminder");
+            } else {
+                // Delete the file after successful delivery.
+                if let Err(e) = std::fs::remove_file(&path) {
+                    warn!(agent = %agent_name, path = %path.display(), error = %e, "failed to delete reminder file");
+                }
+            }
+        }
+    }
+}
+
 /// Post a task message to the bus.
 async fn post_to_bus(socket_path: &str, agent_name: &str, target: &str, text: &str) -> Result<()> {
     let mut stream = UnixStream::connect(socket_path)
