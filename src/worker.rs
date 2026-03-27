@@ -127,7 +127,21 @@ pub async fn run(
     let mut lines = BufReader::new(reader).lines();
     let writer = std::sync::Arc::new(tokio::sync::Mutex::new(writer));
 
-    info!(agent = %name, "waiting for tasks");
+    // Start persistent Claude process (reused across tasks).
+    let effective_bus = bus_socket.as_deref().unwrap_or(socket_path).to_string();
+    let mut process = agent::AgentProcess::start(name, &effective_bus).await?;
+
+    // Build task limits from agent config — enforced in real-time during tasks.
+    let limits = agent::TaskLimits {
+        max_turns: if initial_state.config.max_turns > 0 {
+            Some(initial_state.config.max_turns)
+        } else {
+            None
+        },
+        budget_usd: Some(budget_usd),
+    };
+
+    info!(agent = %name, "persistent process ready, waiting for tasks");
 
     while let Some(line) = lines.next_line().await? {
         if line.is_empty() {
@@ -217,12 +231,6 @@ pub async fn run(
             let _ = agent::save_state_pub(&st);
         }
 
-        let max_turns = msg
-            .payload
-            .get("max_turns")
-            .and_then(|t| t.as_u64())
-            .map(|t| t as u32);
-
         // Determine reply target: workflow engine tasks route back to sm:<id>.
         let reply_target =
             if let Some(sm_id) = msg.payload.get("sm_instance_id").and_then(|v| v.as_str()) {
@@ -294,7 +302,7 @@ pub async fn run(
             None
         };
 
-        // Unified streaming path: always use send_streaming() for all targets.
+        // Stream progress blocks to the bus as they arrive.
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let writer_fwd = writer.clone();
         let name_owned = name.to_string();
@@ -314,21 +322,11 @@ pub async fn run(
             full_response
         });
 
-        // Create injection channel for mid-task message forwarding.
-        let (inject_tx, inject_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-
         let image = image_base64.as_deref().zip(image_media_type.as_deref());
 
-        // Pin the task future so we can poll it in select!
-        let mut task_fut = Box::pin(agent::send_streaming(
-            name,
-            task,
-            max_turns,
-            bus_socket.as_deref(),
-            progress_tx,
-            image,
-            Some(inject_rx),
-        ));
+        // Use the persistent process. send_task writes to its stdin and reads
+        // stdout events until the result event marks the turn complete.
+        let mut task_fut = Box::pin(process.send_task(task, Some(&progress_tx), image, &limits));
 
         // Concurrently await task completion OR new bus messages for injection.
         let result = loop {
@@ -353,7 +351,7 @@ pub async fn run(
                                 task = %truncate(inject_task, 80),
                                 "injecting mid-task message"
                             );
-                            let _ = inject_tx.send(inject_task.to_string());
+                            let _ = process.inject_message(inject_task);
                         }
                     } else {
                         warn!(agent = %name, "invalid message from bus during task, skipping");
@@ -361,9 +359,10 @@ pub async fn run(
                 }
             }
         };
-        // Dropping inject_tx signals the inject forwarder in agent.rs to exit.
-        drop(inject_tx);
 
+        // Drop the future to release borrows on process and progress_tx.
+        drop(task_fut);
+        drop(progress_tx);
         let full_response = fwd_task.await.unwrap_or_default();
 
         // Telegram-specific: cancel progress timer, signal typing stop.
@@ -390,12 +389,22 @@ pub async fn run(
 
         set_idle(name);
         match result {
-            Ok(_) => {
-                info!(agent = %name, "task completed (streamed)");
+            Ok(turn) => {
+                info!(
+                    agent = %name,
+                    cost = turn.cost_usd,
+                    turns = turn.num_turns,
+                    "task completed (persistent)"
+                );
 
                 // Write to file-based inbox for all senders.
-                if !full_response.is_empty() {
-                    write_inbox(name, &msg, task, Some(full_response), None);
+                let response = if full_response.is_empty() {
+                    turn.response_text.clone()
+                } else {
+                    full_response
+                };
+                if !response.is_empty() {
+                    write_inbox(name, &msg, task, Some(response), None);
                 }
 
                 // Send final completion marker to reply_to.
@@ -408,19 +417,37 @@ pub async fn run(
                 .await;
             }
             Err(e) => {
-                warn!(agent = %name, error = %e, "task failed");
-                write_inbox(name, &msg, task, None, Some(format!("{}", e)));
+                let err_str = format!("{}", e);
+                warn!(agent = %name, error = %err_str, "task failed");
+
+                // If the persistent process died, try to restart it.
+                if err_str.contains("persistent process exited") || err_str.contains("stdin closed")
+                {
+                    warn!(agent = %name, "persistent process crashed, restarting");
+                    match agent::AgentProcess::start(name, &effective_bus).await {
+                        Ok(new_proc) => {
+                            process = new_proc;
+                            info!(agent = %name, "persistent process restarted");
+                        }
+                        Err(re) => {
+                            warn!(agent = %name, error = %re, "failed to restart persistent process");
+                        }
+                    }
+                }
+
+                write_inbox(name, &msg, task, None, Some(err_str.clone()));
                 write_bus_envelope(
                     &writer,
                     name,
                     &reply_target,
-                    serde_json::json!({"error": format!("{}", e), "in_reply_to": msg.id}),
+                    serde_json::json!({"error": err_str, "in_reply_to": msg.id}),
                 )
                 .await;
             }
         }
     }
 
+    process.stop().await;
     info!(agent = %name, "disconnected from bus");
     Ok(())
 }

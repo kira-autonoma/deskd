@@ -1,0 +1,17 @@
+#!/bin/sh
+# Pre-commit hook: run cargo fmt --check on staged Rust files.
+# Skip if cargo/rustfmt is not installed.
+
+if ! command -v cargo >/dev/null 2>&1; then
+    exit 0
+fi
+
+# Only check if any .rs files are staged.
+if git diff --cached --name-only --diff-filter=ACM | grep -q '\.rs$'; then
+    cargo fmt --check 2>&1
+    if [ $? -ne 0 ]; then
+        echo ""
+        echo "cargo fmt check failed. Run 'cargo fmt' to fix."
+        exit 1
+    fi
+fi

@@ -169,6 +169,14 @@ cargo fmt && cargo clippy -- -D warnings && cargo test
 
 Releases are built by GitHub Actions on tag push. Download from GitHub Releases.
 
+## Formatting
+
+Rust files are auto-formatted via two mechanisms:
+- **Claude Code hook**: `.claude/settings.json` runs `rustfmt` on every .rs file after Write/Edit
+- **Git pre-commit hook**: `.githooks/pre-commit` runs `cargo fmt --check` before commit
+
+If you edit .rs files, formatting is handled automatically. No need to run `cargo fmt` manually.
+
 ## Conventions
 
 - Merge directly to main (squash merge, no PRs for owner repos)
