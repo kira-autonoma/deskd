@@ -622,13 +622,10 @@ pub fn markdown_to_html(text: &str) -> String {
         }
 
         // ── Blockquote ─────────────────────────────────────────────────────
-        if let Some(inner) = trimmed.strip_prefix("> ").or_else(|| {
-            if trimmed == ">" {
-                Some("")
-            } else {
-                None
-            }
-        }) {
+        if let Some(inner) = trimmed
+            .strip_prefix("> ")
+            .or_else(|| if trimmed == ">" { Some("") } else { None })
+        {
             result.push_str("<blockquote>");
             result.push_str(&inline_to_html(inner));
             result.push_str("</blockquote>\n");
@@ -698,11 +695,11 @@ fn render_table(rows: &[&str]) -> String {
 }
 
 fn is_table_separator(row: &str) -> bool {
-    row.trim()
-        .trim_matches('|')
-        .split('|')
-        .all(|cell| cell.trim().chars().all(|c| c == '-' || c == ':' || c == ' '))
-        && row.contains('-')
+    row.trim().trim_matches('|').split('|').all(|cell| {
+        cell.trim()
+            .chars()
+            .all(|c| c == '-' || c == ':' || c == ' ')
+    }) && row.contains('-')
 }
 
 /// Apply inline Markdown formatting to a single line of text.
