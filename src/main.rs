@@ -986,12 +986,15 @@ async fn serve(config_path: String) -> anyhow::Result<()> {
             });
         }
 
-        // Start schedule tasks if the user config has schedules.
-        if let Some(ref ucfg) = user_cfg
-            && !ucfg.schedules.is_empty()
+        // Start schedule watcher — handles initial load + hot-reload on config changes.
         {
-            schedule::start(ucfg.schedules.clone(), bus_socket.clone(), name.clone());
-            info!(agent = %name, count = ucfg.schedules.len(), "started schedules");
+            let bus = bus_socket.clone();
+            let agent_name = name.clone();
+            let config = cfg_path.clone();
+            tokio::spawn(async move {
+                schedule::watch_and_reload(config, bus, agent_name).await;
+            });
+            info!(agent = %name, "started schedule watcher");
         }
 
         // Start worker on the agent's bus.

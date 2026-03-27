@@ -17,16 +17,75 @@ use uuid::Uuid;
 
 use crate::config::{ScheduleAction, ScheduleDef};
 
-/// Spawn one tokio task per schedule entry.
-/// `agent_name` is used for bus registration names and logging.
-pub fn start(defs: Vec<ScheduleDef>, bus_socket: String, agent_name: String) {
-    for def in defs {
-        let bus = bus_socket.clone();
-        let name = agent_name.clone();
-        tokio::spawn(async move {
-            run_schedule(def, bus, name).await;
-        });
+/// Spawn one tokio task per schedule entry and return their handles.
+/// Callers can abort the returned handles to cancel running schedules.
+pub fn start(
+    defs: Vec<ScheduleDef>,
+    bus_socket: String,
+    agent_name: String,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    defs.into_iter()
+        .map(|def| {
+            let bus = bus_socket.clone();
+            let name = agent_name.clone();
+            tokio::spawn(async move {
+                run_schedule(def, bus, name).await;
+            })
+        })
+        .collect()
+}
+
+/// Watch a config file for changes and hot-reload schedules.
+///
+/// Performs initial load, then polls the file mtime every 30 seconds.
+/// On change, aborts all running schedule tasks and restarts them from the
+/// new config.
+pub async fn watch_and_reload(config_path: String, bus_socket: String, agent_name: String) {
+    let mut last_modified = file_mtime(&config_path);
+    let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+
+    // Initial load
+    if let Ok(cfg) = crate::config::UserConfig::load(&config_path)
+        && !cfg.schedules.is_empty()
+    {
+        let count = cfg.schedules.len();
+        handles = start(cfg.schedules, bus_socket.clone(), agent_name.clone());
+        info!(agent = %agent_name, count, "initial schedules loaded");
     }
+
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+        let current_mtime = file_mtime(&config_path);
+        if current_mtime == last_modified {
+            continue;
+        }
+        last_modified = current_mtime;
+
+        info!(agent = %agent_name, "config file changed, reloading schedules");
+
+        // Cancel all existing schedule tasks
+        let removed = handles.len();
+        for h in handles.drain(..) {
+            h.abort();
+        }
+
+        // Reload config and restart schedules
+        match crate::config::UserConfig::load(&config_path) {
+            Ok(cfg) => {
+                let added = cfg.schedules.len();
+                handles = start(cfg.schedules, bus_socket.clone(), agent_name.clone());
+                info!(agent = %agent_name, added, removed, "schedules reloaded");
+            }
+            Err(e) => {
+                warn!(agent = %agent_name, error = %e, "failed to reload config, schedules stopped");
+            }
+        }
+    }
+}
+
+fn file_mtime(path: &str) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
 async fn run_schedule(def: ScheduleDef, bus_socket: String, agent_name: String) {
