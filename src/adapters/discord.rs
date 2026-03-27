@@ -5,12 +5,11 @@
 ///   Outgoing:  adapter subscribes to `discord.out:<channel_id>` (glob: `discord.out:*`)
 ///
 /// The adapter ignores messages from bots to prevent reply loops.
-use anyhow::{Context, Result};
-use serenity::async_trait;
+use anyhow::{Context as _, Result};
 use serenity::http::Http;
 use serenity::model::channel::Message;
 use serenity::model::gateway::Ready;
-use serenity::prelude::*;
+use serenity::prelude::{Client, Context, EventHandler, GatewayIntents};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -115,7 +114,6 @@ struct DiscordHandler {
     allowed_channels: HashSet<u64>,
 }
 
-#[async_trait]
 impl EventHandler for DiscordHandler {
     async fn ready(&self, _ctx: Context, ready: Ready) {
         info!(bot = %ready.user.name, "Discord bot connected");
