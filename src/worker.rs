@@ -151,6 +151,21 @@ pub async fn run(
                 budget = budget_usd,
                 "budget exceeded, rejecting task"
             );
+
+            // Notify the sender so they get a visible error instead of silence.
+            let budget_error = format!(
+                "Budget limit reached (${:.2} / ${:.2}). Task not processed.",
+                current_state.total_cost, budget_usd,
+            );
+            let reply_target = msg.reply_to.as_deref().unwrap_or(&msg.source);
+            write_bus_envelope(
+                &writer,
+                name,
+                reply_target,
+                serde_json::json!({"error": budget_error, "in_reply_to": msg.id}),
+            )
+            .await;
+
             continue;
         }
 
