@@ -519,6 +519,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 fn handle_sm(action: SmAction, user_cfg: &config::UserConfig) -> anyhow::Result<()> {
+    let store = statemachine::StateMachineStore::default_for_home();
     match action {
         SmAction::Models => {
             if user_cfg.models.is_empty() {
@@ -579,14 +580,14 @@ fn handle_sm(action: SmAction, user_cfg: &config::UserConfig) -> anyhow::Result<
                 .find(|m| m.name == model)
                 .ok_or_else(|| anyhow::anyhow!("Model '{}' not found", model))?;
             let creator = std::env::var("DESKD_AGENT_NAME").unwrap_or_else(|_| "cli".to_string());
-            let inst = statemachine::create(m, &title, body.as_deref().unwrap_or(""), &creator)?;
+            let inst = store.create(m, &title, body.as_deref().unwrap_or(""), &creator)?;
             println!(
                 "Created {} (model={}, state={})",
                 inst.id, inst.model, inst.state
             );
         }
         SmAction::Move { id, state, note } => {
-            let mut inst = statemachine::load(&id)?;
+            let mut inst = store.load(&id)?;
             let m = user_cfg
                 .models
                 .iter()
@@ -594,11 +595,11 @@ fn handle_sm(action: SmAction, user_cfg: &config::UserConfig) -> anyhow::Result<
                 .ok_or_else(|| anyhow::anyhow!("Model '{}' not found in config", inst.model))?;
             let trigger =
                 std::env::var("DESKD_AGENT_NAME").unwrap_or_else(|_| "manual".to_string());
-            statemachine::move_to(&mut inst, m, &state, &trigger, note.as_deref())?;
+            store.move_to(&mut inst, m, &state, &trigger, note.as_deref())?;
             println!("{} -> {} ({})", id, inst.state, inst.model);
         }
         SmAction::Status { id } => {
-            let inst = statemachine::load(&id)?;
+            let inst = store.load(&id)?;
             println!("ID:        {}", inst.id);
             println!("Model:     {}", inst.model);
             println!("Title:     {}", inst.title);
@@ -631,7 +632,7 @@ fn handle_sm(action: SmAction, user_cfg: &config::UserConfig) -> anyhow::Result<
             state,
             limit,
         } => {
-            let mut instances = statemachine::list_all()?;
+            let mut instances = store.list_all()?;
             if let Some(ref m) = model {
                 instances.retain(|i| i.model == *m);
             }
@@ -659,7 +660,7 @@ fn handle_sm(action: SmAction, user_cfg: &config::UserConfig) -> anyhow::Result<
             }
         }
         SmAction::Cancel { id } => {
-            let mut inst = statemachine::load(&id)?;
+            let mut inst = store.load(&id)?;
             let m = user_cfg
                 .models
                 .iter()
@@ -682,7 +683,7 @@ fn handle_sm(action: SmAction, user_cfg: &config::UserConfig) -> anyhow::Result<
                     )
                 })?;
             let target = cancel_target.to.clone();
-            statemachine::move_to(&mut inst, m, &target, "cancel", Some("Cancelled via CLI"))?;
+            store.move_to(&mut inst, m, &target, "cancel", Some("Cancelled via CLI"))?;
             println!("{} cancelled -> {}", id, inst.state);
         }
     }
