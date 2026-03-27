@@ -295,8 +295,7 @@ async fn send_inner(
     let mut child = cmd.spawn().context("Failed to spawn claude CLI")?;
 
     // Internal channel: all lines that should be written to Claude's stdin flow through here.
-    let (stdin_line_tx, mut stdin_line_rx) =
-        tokio::sync::mpsc::unbounded_channel::<String>();
+    let (stdin_line_tx, mut stdin_line_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     // Build and send the initial user message (text + optional image).
     let initial_msg = if let Some((b64_data, media_type)) = image {
