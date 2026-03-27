@@ -3,7 +3,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
@@ -200,19 +200,30 @@ pub async fn send(
     max_turns: Option<u32>,
     bus_socket: Option<&str>,
 ) -> Result<String> {
-    send_inner(name, message, max_turns, bus_socket, None).await
+    send_inner(name, message, max_turns, bus_socket, None, None).await
 }
 
 /// Like `send`, but streams each assistant text block to `progress_tx` as it arrives.
 /// Still returns the full concatenated response when done.
+/// When `image` is Some((base64_data, media_type)), the message is sent as multimodal
+/// content via stream-json input format, allowing Claude to see the image.
 pub async fn send_streaming(
     name: &str,
     message: &str,
     max_turns: Option<u32>,
     bus_socket: Option<&str>,
     progress_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    image: Option<(&str, &str)>,
 ) -> Result<String> {
-    send_inner(name, message, max_turns, bus_socket, Some(progress_tx)).await
+    send_inner(
+        name,
+        message,
+        max_turns,
+        bus_socket,
+        Some(progress_tx),
+        image,
+    )
+    .await
 }
 
 async fn send_inner(
@@ -221,10 +232,14 @@ async fn send_inner(
     max_turns: Option<u32>,
     bus_socket: Option<&str>,
     progress_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    image: Option<(&str, &str)>,
 ) -> Result<String> {
     let mut state = load_state(name)?;
 
     let turns = max_turns.unwrap_or(state.config.max_turns);
+
+    // When image data is provided, use stream-json input to send multimodal content.
+    let use_stream_input = image.is_some();
 
     // Dynamic args only — the base command + flags come from config.command field.
     // deskd appends session management and the prompt.
@@ -240,11 +255,19 @@ async fn send_inner(
         args.push(state.config.system_prompt.clone());
     }
 
-    // -p <message> goes last so leading dashes in message are not parsed as flags.
-    args.push("-p".to_string());
-    args.push(message.to_string());
+    if use_stream_input {
+        // For multimodal messages: use stream-json on stdin instead of -p flag.
+        // --input-format=stream-json reads JSON messages from stdin.
+        // --output-format=stream-json and --verbose are already in config.command
+        // for streaming agents, but we ensure they're present.
+        args.push("--input-format=stream-json".to_string());
+    } else {
+        // -p <message> goes last so leading dashes in message are not parsed as flags.
+        args.push("-p".to_string());
+        args.push(message.to_string());
+    }
 
-    debug!(agent = %name, turns, "spawning claude");
+    debug!(agent = %name, turns, multimodal = use_stream_input, "spawning claude");
 
     // Env vars injected into the claude process:
     //   DESKD_BUS_SOCKET  — bus socket for MCP send_message tool
@@ -262,7 +285,40 @@ async fn send_inner(
     }
 
     let mut cmd = build_command(&state.config, &args, &extra_env);
+    if use_stream_input {
+        cmd.stdin(Stdio::piped());
+    }
     let mut child = cmd.spawn().context("Failed to spawn claude CLI")?;
+
+    // When using stream-json input, write the multimodal user message to stdin.
+    if use_stream_input {
+        let mut stdin = child.stdin.take().expect("stdin is piped");
+        let (b64_data, media_type) = image.unwrap();
+        let user_msg = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": b64_data,
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": message,
+                    }
+                ]
+            }
+        });
+        let mut json_line = serde_json::to_string(&user_msg)?;
+        json_line.push('\n');
+        stdin.write_all(json_line.as_bytes()).await?;
+        drop(stdin); // Close stdin so claude knows input is done.
+    }
 
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr = child.stderr.take().expect("stderr is piped");
@@ -348,6 +404,7 @@ async fn send_inner(
                 max_turns,
                 bus_socket,
                 progress_tx,
+                image,
             ))
             .await;
         }
