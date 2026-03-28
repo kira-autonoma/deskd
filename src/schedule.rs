@@ -179,6 +179,17 @@ async fn fire_github_poll(def: &ScheduleDef, bus_socket: &str, agent_name: &str)
 
     let events = parse_events(cfg);
 
+    let ignore_users: Vec<String> = cfg
+        .get("ignore_users")
+        .and_then(|v| v.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+
     let mut since_state = load_since_state();
 
     for repo in &repos {
@@ -191,7 +202,17 @@ async fn fire_github_poll(def: &ScheduleDef, bus_socket: &str, agent_name: &str)
         let mut had_error = false;
 
         if events.contains(&"issues".to_string()) {
-            match poll_issues(repo, label, &since, bus_socket, agent_name, &def.target).await {
+            match poll_issues(
+                repo,
+                label,
+                &since,
+                bus_socket,
+                agent_name,
+                &def.target,
+                &ignore_users,
+            )
+            .await
+            {
                 Ok(n) => count += n,
                 Err(e) => {
                     warn!(agent = %agent_name, repo = %repo, error = %e, "github_poll issues failed");
@@ -201,7 +222,16 @@ async fn fire_github_poll(def: &ScheduleDef, bus_socket: &str, agent_name: &str)
         }
 
         if events.contains(&"issue_comments".to_string()) {
-            match poll_issue_comments(repo, &since, bus_socket, agent_name, &def.target).await {
+            match poll_issue_comments(
+                repo,
+                &since,
+                bus_socket,
+                agent_name,
+                &def.target,
+                &ignore_users,
+            )
+            .await
+            {
                 Ok(n) => count += n,
                 Err(e) => {
                     warn!(agent = %agent_name, repo = %repo, error = %e, "github_poll issue_comments failed");
@@ -250,6 +280,7 @@ async fn poll_issues(
     bus_socket: &str,
     agent_name: &str,
     target: &str,
+    ignore_users: &[String],
 ) -> Result<usize> {
     let mut endpoint = format!(
         "repos/{}/issues?state=open&since={}&per_page=100&sort=updated&direction=desc",
@@ -280,6 +311,15 @@ async fn poll_issues(
             continue;
         }
 
+        let user = item
+            .get("user")
+            .and_then(|u| u.get("login"))
+            .and_then(|l| l.as_str())
+            .unwrap_or("");
+        if ignore_users.iter().any(|u| u == user) {
+            continue;
+        }
+
         let title = item.get("title").and_then(|t| t.as_str()).unwrap_or("");
         let number = item.get("number").and_then(|n| n.as_u64()).unwrap_or(0);
         let body = item.get("body").and_then(|b| b.as_str()).unwrap_or("");
@@ -304,6 +344,7 @@ async fn poll_issue_comments(
     bus_socket: &str,
     agent_name: &str,
     target: &str,
+    ignore_users: &[String],
 ) -> Result<usize> {
     let endpoint = format!(
         "repos/{}/issues/comments?since={}&per_page=100&sort=updated&direction=desc",
@@ -331,6 +372,9 @@ async fn poll_issue_comments(
             .and_then(|u| u.get("login"))
             .and_then(|l| l.as_str())
             .unwrap_or("unknown");
+        if ignore_users.iter().any(|u| u == user) {
+            continue;
+        }
         let body = comment.get("body").and_then(|b| b.as_str()).unwrap_or("");
         let html_url = comment
             .get("html_url")
