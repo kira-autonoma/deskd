@@ -147,12 +147,17 @@ async fn handle_connection(stream: UnixStream, state: Arc<RwLock<BusState>>) -> 
         );
     }
 
-    // Writer task — sends messages from channel to the socket
+    // Writer task — sends messages from channel to the socket.
+    // Flush after each write to ensure the subscriber receives it immediately
+    // rather than waiting for the next write to push it out of kernel buffers.
     let writer_handle = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
             let mut line = serde_json::to_string(&msg).unwrap_or_default();
             line.push('\n');
             if writer.write_all(line.as_bytes()).await.is_err() {
+                break;
+            }
+            if writer.flush().await.is_err() {
                 break;
             }
         }

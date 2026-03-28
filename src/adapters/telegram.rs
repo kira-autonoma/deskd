@@ -22,6 +22,60 @@ use uuid::Uuid;
 
 use crate::config::TelegramRoute;
 
+/// Maximum characters per Telegram message (API limit).
+const TELEGRAM_MAX_LEN: usize = 4096;
+
+/// Split `text` into chunks of at most `TELEGRAM_MAX_LEN` characters.
+/// Prefers splitting at newline boundaries so lines aren't broken mid-way.
+/// If a single line exceeds the limit, it is hard-split at `TELEGRAM_MAX_LEN`.
+fn split_message(text: &str) -> Vec<String> {
+    if text.len() <= TELEGRAM_MAX_LEN {
+        return vec![text.to_string()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+
+    for line in text.split_inclusive('\n') {
+        // If adding this line would exceed the limit, flush current chunk first.
+        if !current.is_empty() && current.len() + line.len() > TELEGRAM_MAX_LEN {
+            chunks.push(std::mem::take(&mut current));
+        }
+
+        // If the line itself exceeds the limit, hard-split it.
+        if line.len() > TELEGRAM_MAX_LEN {
+            let mut remaining = line;
+            while !remaining.is_empty() {
+                let space = TELEGRAM_MAX_LEN - current.len();
+                if space == 0 {
+                    chunks.push(std::mem::take(&mut current));
+                    continue;
+                }
+                let split_at = remaining
+                    .char_indices()
+                    .take_while(|(i, _)| *i < space)
+                    .last()
+                    .map(|(i, c)| i + c.len_utf8())
+                    .unwrap_or(space.min(remaining.len()));
+                let (head, tail) = remaining.split_at(split_at);
+                current.push_str(head);
+                remaining = tail;
+                if current.len() >= TELEGRAM_MAX_LEN {
+                    chunks.push(std::mem::take(&mut current));
+                }
+            }
+        } else {
+            current.push_str(line);
+        }
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
+    chunks
+}
+
 /// Telegram sender metadata passed through the bus payload.
 struct SenderInfo {
     id: u64,
@@ -189,6 +243,7 @@ async fn bus_loop(
     let mut line = serde_json::to_string(&reg)?;
     line.push('\n');
     stream.write_all(line.as_bytes()).await?;
+    stream.flush().await?;
     info!(adapter = %adapter_name, "telegram adapter registered on bus");
 
     // Keep _writer alive — dropping it closes the connection.
@@ -335,18 +390,24 @@ async fn outbound_sender(bot: Bot, mut rx: mpsc::UnboundedReceiver<OutboundCmd>)
                 };
 
                 let chat = ChatId(chat_id);
-                let html = markdown_to_html(&text);
 
-                // Try HTML first, fall back to plain text on error.
-                let result = bot
-                    .send_message(chat, &html)
-                    .parse_mode(ParseMode::Html)
-                    .await;
+                // Split long messages into chunks to stay within Telegram's
+                // 4096-character limit. Each chunk is sent as a separate message.
+                let chunks = split_message(&text);
+                for chunk in &chunks {
+                    let html = markdown_to_html(chunk);
 
-                if result.is_err()
-                    && let Err(e) = bot.send_message(chat, &text).await
-                {
-                    warn!(chat_id = chat_id, error = %e, "failed to send Telegram message");
+                    // Try HTML first, fall back to plain text on error.
+                    let result = bot
+                        .send_message(chat, &html)
+                        .parse_mode(ParseMode::Html)
+                        .await;
+
+                    if result.is_err()
+                        && let Err(e) = bot.send_message(chat, chunk).await
+                    {
+                        warn!(chat_id = chat_id, error = %e, "failed to send Telegram message");
+                    }
                 }
 
                 // Restart typing loop only if we were already typing in this chat
@@ -549,6 +610,7 @@ async fn publish_to_bus(
     let mut reg_line = serde_json::to_string(&reg)?;
     reg_line.push('\n');
     stream.write_all(reg_line.as_bytes()).await?;
+    stream.flush().await?;
 
     let mut payload = serde_json::json!({
         "task": text,
@@ -587,6 +649,7 @@ async fn publish_to_bus(
     let mut msg_line = serde_json::to_string(&msg)?;
     msg_line.push('\n');
     stream.write_all(msg_line.as_bytes()).await?;
+    stream.flush().await?;
 
     Ok(())
 }
@@ -952,5 +1015,66 @@ mod tests {
             .parse()
             .unwrap();
         assert_eq!(id, -1001234567890i64);
+    }
+
+    // ── split_message tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_split_message_short() {
+        let text = "hello world";
+        let chunks = split_message(text);
+        assert_eq!(chunks, vec!["hello world"]);
+    }
+
+    #[test]
+    fn test_split_message_exact_limit() {
+        let text = "a".repeat(TELEGRAM_MAX_LEN);
+        let chunks = split_message(&text);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].len(), TELEGRAM_MAX_LEN);
+    }
+
+    #[test]
+    fn test_split_message_newline_boundary() {
+        // Two lines that together exceed the limit — should split at the newline.
+        let line_a = format!("{}\n", "a".repeat(3000));
+        let line_b = "b".repeat(2000);
+        let text = format!("{}{}", line_a, line_b);
+        let chunks = split_message(&text);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], line_a);
+        assert_eq!(chunks[1], line_b);
+    }
+
+    #[test]
+    fn test_split_message_single_long_line() {
+        // A single line that exceeds the limit — must hard-split.
+        let text = "x".repeat(TELEGRAM_MAX_LEN + 100);
+        let chunks = split_message(&text);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), TELEGRAM_MAX_LEN);
+        assert_eq!(chunks[1].len(), 100);
+    }
+
+    #[test]
+    fn test_split_message_many_short_lines() {
+        // Many short lines that fit in one chunk.
+        let text = (0..100)
+            .map(|i| format!("line {}\n", i))
+            .collect::<String>();
+        assert!(text.len() < TELEGRAM_MAX_LEN);
+        let chunks = split_message(&text);
+        assert_eq!(chunks.len(), 1);
+    }
+
+    #[test]
+    fn test_split_message_preserves_content() {
+        let line_a = format!("{}\n", "a".repeat(3000));
+        let line_b = format!("{}\n", "b".repeat(3000));
+        let line_c = "c".repeat(500);
+        let text = format!("{}{}{}", line_a, line_b, line_c);
+        let chunks = split_message(&text);
+        let rejoined: String = chunks.concat();
+        assert_eq!(rejoined, text);
     }
 }
