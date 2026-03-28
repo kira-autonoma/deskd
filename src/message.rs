@@ -23,6 +23,10 @@ pub struct Message {
 pub struct Metadata {
     #[serde(default = "default_priority")]
     pub priority: u8,
+    /// When true, the worker should start a fresh session for this task
+    /// (no --resume), regardless of the agent's default session config.
+    #[serde(default)]
+    pub fresh: bool,
 }
 
 fn default_priority() -> u8 {
@@ -92,6 +96,29 @@ mod tests {
                 assert_eq!(msg.source, "agent1");
                 assert_eq!(msg.target, "telegram:-123");
                 assert_eq!(msg.payload["result"], "task done");
+            }
+            _ => panic!("expected Message variant"),
+        }
+    }
+    #[test]
+    fn test_metadata_fresh_flag() {
+        let json = r#"{"type":"message","id":"abc","source":"cli","target":"agent:dev","payload":{"task":"hello"},"metadata":{"priority":5,"fresh":true}}"#;
+        let env: Envelope = serde_json::from_str(json).unwrap();
+        match env {
+            Envelope::Message(msg) => {
+                assert!(msg.metadata.fresh);
+            }
+            _ => panic!("expected Message variant"),
+        }
+    }
+
+    #[test]
+    fn test_metadata_fresh_default() {
+        let json = r#"{"type":"message","id":"abc","source":"cli","target":"agent:dev","payload":{"task":"hello"},"metadata":{"priority":5}}"#;
+        let env: Envelope = serde_json::from_str(json).unwrap();
+        match env {
+            Envelope::Message(msg) => {
+                assert!(!msg.metadata.fresh);
             }
             _ => panic!("expected Message variant"),
         }

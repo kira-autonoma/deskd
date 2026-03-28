@@ -7,7 +7,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
-use crate::config::{self, ContainerConfig, UserConfig};
+use crate::config::{self, ContainerConfig, SessionMode, UserConfig};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -31,6 +31,9 @@ pub struct AgentConfig {
     /// Container config. When set, the agent runs inside a container.
     #[serde(default)]
     pub container: Option<ContainerConfig>,
+    /// Session mode: persistent (default) or ephemeral.
+    #[serde(default)]
+    pub session: SessionMode,
 }
 
 fn default_budget_usd() -> f64 {
@@ -167,6 +170,7 @@ pub async fn create_or_recover(
         command: def.command.clone(),
         config_path: Some(def.config_path()),
         container: def.container.clone(),
+        session: SessionMode::default(),
     };
 
     let path = state_path(&def.name);
@@ -237,12 +241,16 @@ async fn send_inner(
     // Always use stream-json input so we can keep stdin open for mid-task injection.
     let mut args: Vec<String> = Vec::new();
 
-    if !state.session_id.is_empty() {
+    // Use --resume only when session is persistent and session_id exists.
+    let use_resume =
+        state.config.session == SessionMode::Persistent && !state.session_id.is_empty();
+
+    if use_resume {
         args.push("--resume".to_string());
         args.push(state.session_id.clone());
     }
 
-    if !state.config.system_prompt.is_empty() && state.session_id.is_empty() {
+    if !state.config.system_prompt.is_empty() && !use_resume {
         args.push("--system-prompt".to_string());
         args.push(state.config.system_prompt.clone());
     }
@@ -408,7 +416,8 @@ async fn send_inner(
     let _ = child.wait().await;
     let stderr_str = stderr_task.await.unwrap_or_default();
 
-    if !new_session_id.is_empty() {
+    // Only save session_id for persistent agents.
+    if state.config.session == SessionMode::Persistent && !new_session_id.is_empty() {
         state.session_id = new_session_id;
     }
     state.total_cost += task_cost;
@@ -641,6 +650,7 @@ pub async fn spawn_ephemeral(
         command: default_agent_command(),
         config_path: None,
         container: None,
+        session: SessionMode::default(),
     };
 
     create(&cfg).await?;
@@ -747,7 +757,21 @@ pub struct AgentProcess {
 impl AgentProcess {
     /// Spawn a persistent Claude process for the named agent.
     pub async fn start(name: &str, bus_socket: &str) -> Result<Self> {
-        let (stdin_tx, event_rx, child) = Self::spawn_process(name, bus_socket).await?;
+        let (stdin_tx, event_rx, child) = Self::spawn_process(name, bus_socket, false).await?;
+
+        Ok(Self {
+            stdin_tx,
+            event_rx: tokio::sync::Mutex::new(event_rx),
+            child: tokio::sync::Mutex::new(Some(child)),
+            name: name.to_string(),
+            last_reported_cost: tokio::sync::Mutex::new(0.0),
+            last_reported_turns: tokio::sync::Mutex::new(0),
+        })
+    }
+
+    /// Spawn a persistent Claude process with a fresh session (no --resume).
+    pub async fn start_fresh(name: &str, bus_socket: &str) -> Result<Self> {
+        let (stdin_tx, event_rx, child) = Self::spawn_process(name, bus_socket, true).await?;
 
         Ok(Self {
             stdin_tx,
@@ -760,9 +784,11 @@ impl AgentProcess {
     }
 
     /// Core spawn logic — builds args, starts child, wires stdin/stdout tasks.
+    /// When  is true, skip --resume regardless of session mode/state.
     async fn spawn_process(
         name: &str,
         bus_socket: &str,
+        fresh: bool,
     ) -> Result<(
         tokio::sync::mpsc::UnboundedSender<String>,
         tokio::sync::mpsc::UnboundedReceiver<StdoutEvent>,
@@ -772,12 +798,17 @@ impl AgentProcess {
 
         let mut args: Vec<String> = Vec::new();
 
-        if !state.session_id.is_empty() {
+        // Use --resume only when session is persistent and fresh is not requested.
+        let use_resume = !fresh
+            && state.config.session == SessionMode::Persistent
+            && !state.session_id.is_empty();
+
+        if use_resume {
             args.push("--resume".to_string());
             args.push(state.session_id.clone());
         }
 
-        if !state.config.system_prompt.is_empty() && state.session_id.is_empty() {
+        if !state.config.system_prompt.is_empty() && !use_resume {
             args.push("--system-prompt".to_string());
             args.push(state.config.system_prompt.clone());
         }
@@ -997,7 +1028,10 @@ impl AgentProcess {
 
                     // Update state file with deltas.
                     if let Ok(mut state) = load_state(&self.name) {
-                        if !result.session_id.is_empty() {
+                        // Only save session_id for persistent agents.
+                        if state.config.session == SessionMode::Persistent
+                            && !result.session_id.is_empty()
+                        {
                             state.session_id = result.session_id.clone();
                         }
                         state.total_cost += cost_delta;
@@ -1094,6 +1128,7 @@ created_at: "2024-01-01T00:00:00Z"
             command: vec!["claude".to_string()],
             config_path: Some("/home/agent1/deskd.yaml".to_string()),
             container: None,
+            session: SessionMode::default(),
         };
         let state = AgentState {
             config: cfg,
@@ -1208,6 +1243,7 @@ created_at: "2024-01-01T00:00:00Z"
             ],
             config_path: Some("/home/test/deskd.yaml".to_string()),
             container: Some(container),
+            session: SessionMode::default(),
         };
 
         let extra_env = [("DESKD_BUS_SOCKET", "/home/test/.deskd/bus.sock")];
@@ -1256,6 +1292,7 @@ created_at: "2024-01-01T00:00:00Z"
             command: vec!["claude".to_string()],
             config_path: None,
             container: None,
+            session: SessionMode::default(),
         };
         let cmd = build_command(&cfg, &[], &[]);
         let program = cmd.as_std().get_program().to_string_lossy().to_string();

@@ -233,6 +233,17 @@ pub struct ChannelDef {
     pub description: String,
 }
 
+/// Session mode for an agent: persistent (default) or ephemeral.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionMode {
+    /// Continue existing session across tasks (uses --resume).
+    #[default]
+    Persistent,
+    /// Start a fresh session for each task (no --resume).
+    Ephemeral,
+}
+
 /// A sub-agent running within a parent agent's bus scope.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubAgentDef {
@@ -246,6 +257,10 @@ pub struct SubAgentDef {
     /// Optional allow-list of targets this agent can publish to.
     /// If None, publish to any target is allowed.
     pub publish: Option<Vec<String>>,
+    /// Session mode: persistent (default) or ephemeral.
+    /// Ephemeral agents start a fresh session for each task.
+    #[serde(default)]
+    pub session: SessionMode,
 }
 
 /// Telegram channel routing config in the per-user deskd.yaml.
@@ -591,6 +606,31 @@ schedules:
     }
 
     #[test]
+    fn test_sub_agent_session_mode() {
+        let yaml = r#"
+model: claude-sonnet-4-6
+system_prompt: "Test"
+
+agents:
+  - name: worker
+    model: claude-haiku-4-5
+    system_prompt: "Worker"
+    subscribe:
+      - "agent:worker"
+    session: ephemeral
+
+  - name: researcher
+    model: claude-sonnet-4-6
+    system_prompt: "Researcher"
+    subscribe:
+      - "agent:researcher"
+"#;
+        let cfg: UserConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.agents[0].session, SessionMode::Ephemeral);
+        assert_eq!(cfg.agents[1].session, SessionMode::Persistent); // default
+    }
+
+    #[test]
     fn test_send_message_description() {
         let cfg = UserConfig {
             model: "claude-opus-4-6".into(),
@@ -606,6 +646,7 @@ schedules:
                 system_prompt: "Implements code changes.".into(),
                 subscribe: vec!["agent:dev".into()],
                 publish: None,
+                session: SessionMode::default(),
             }],
             telegram: Some(TelegramRoutesConfig {
                 routes: vec![TelegramRoute {

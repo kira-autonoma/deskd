@@ -221,6 +221,10 @@ fn handle_tools_list(
                     "text": {
                         "type": "string",
                         "description": "Message content"
+                    },
+                    "fresh": {
+                        "type": "boolean",
+                        "description": "When true, the target agent starts a fresh session for this task (no --resume), regardless of its default session config."
                     }
                 },
                 "required": ["target", "text"]
@@ -363,6 +367,7 @@ async fn call_send_message(
         .get("text")
         .and_then(|t| t.as_str())
         .context("missing text")?;
+    let fresh = args.get("fresh").and_then(|f| f.as_bool()).unwrap_or(false);
 
     // Enforce publish allow-list if the calling agent is a sub-agent in config.
     if let Some(cfg) = user_config
@@ -396,7 +401,7 @@ async fn call_send_message(
         "source": agent_name,
         "target": target,
         "payload": {"task": text},
-        "metadata": {"priority": 5u8}
+        "metadata": {"priority": 5u8, "fresh": fresh}
     });
     let mut msg_line = serde_json::to_string(&msg)?;
     msg_line.push('\n');

@@ -5,6 +5,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::agent;
+use crate::config::SessionMode;
 use crate::inbox;
 use crate::message::Message;
 
@@ -192,6 +193,16 @@ pub async fn run(
         if task_raw.is_empty() {
             debug!(agent = %name, "message has no task payload, skipping");
             continue;
+        }
+
+        // Check if this task requests a fresh session (via metadata.fresh flag).
+        // Also check if the agent's session mode is ephemeral.
+        let needs_fresh =
+            msg.metadata.fresh || initial_state.config.session == SessionMode::Ephemeral;
+        if needs_fresh {
+            info!(agent = %name, fresh = msg.metadata.fresh, "fresh session requested, restarting process");
+            process.stop().await;
+            process = agent::AgentProcess::start_fresh(name, &effective_bus).await?;
         }
 
         // Extract optional image data from payload (sent by Telegram adapter for photos).
