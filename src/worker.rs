@@ -424,26 +424,29 @@ pub async fn run(
         drop(progress_tx);
         let full_response = fwd_task.await.unwrap_or_default();
 
-        // Telegram-specific: cancel progress timer, signal typing stop.
+        // Cancel progress timer if running.
         if let Some(cancel_tx) = progress_cancel_tx {
             let _ = cancel_tx.send(());
-            if let Some(chat_id) = telegram_chat_id {
-                let ctrl_target = format!("telegram.ctrl:{}", chat_id);
-                write_bus_envelope(
-                    &writer,
-                    name,
-                    &ctrl_target,
-                    serde_json::json!({"progress_done": true}),
-                )
-                .await;
-                write_bus_envelope(
-                    &writer,
-                    name,
-                    &ctrl_target,
-                    serde_json::json!({"typing": false}),
-                )
-                .await;
-            }
+        }
+
+        // Always send typing stop for Telegram tasks — even if already stopped
+        // in the fwd_task on first chunk, this ensures cleanup on error/empty responses.
+        if let Some(chat_id) = telegram_chat_id {
+            let ctrl_target = format!("telegram.ctrl:{}", chat_id);
+            write_bus_envelope(
+                &writer,
+                name,
+                &ctrl_target,
+                serde_json::json!({"progress_done": true}),
+            )
+            .await;
+            write_bus_envelope(
+                &writer,
+                name,
+                &ctrl_target,
+                serde_json::json!({"typing": false}),
+            )
+            .await;
         }
 
         set_idle(name);
