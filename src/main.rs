@@ -1177,8 +1177,9 @@ async fn serve(config_path: String) -> anyhow::Result<()> {
             let bus = bus_socket.clone();
             let agent_name = name.clone();
             let config = cfg_path.clone();
+            let home = def.work_dir.clone();
             tokio::spawn(async move {
-                schedule::watch_and_reload(config, bus, agent_name).await;
+                schedule::watch_and_reload(config, bus, agent_name, home).await;
             });
             info!(agent = %name, "started schedule watcher");
         }

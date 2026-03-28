@@ -25,13 +25,15 @@ pub fn start(
     defs: Vec<ScheduleDef>,
     bus_socket: String,
     agent_name: String,
+    home_dir: String,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     defs.into_iter()
         .map(|def| {
             let bus = bus_socket.clone();
             let name = agent_name.clone();
+            let home = home_dir.clone();
             tokio::spawn(async move {
-                run_schedule(def, bus, name).await;
+                run_schedule(def, bus, name, home).await;
             })
         })
         .collect()
@@ -42,7 +44,12 @@ pub fn start(
 /// Performs initial load, then polls the file mtime every 30 seconds.
 /// On change, aborts all running schedule tasks and restarts them from the
 /// new config.
-pub async fn watch_and_reload(config_path: String, bus_socket: String, agent_name: String) {
+pub async fn watch_and_reload(
+    config_path: String,
+    bus_socket: String,
+    agent_name: String,
+    home_dir: String,
+) {
     let mut last_modified = file_mtime(&config_path);
     let mut handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
@@ -51,7 +58,12 @@ pub async fn watch_and_reload(config_path: String, bus_socket: String, agent_nam
         && !cfg.schedules.is_empty()
     {
         let count = cfg.schedules.len();
-        handles = start(cfg.schedules, bus_socket.clone(), agent_name.clone());
+        handles = start(
+            cfg.schedules,
+            bus_socket.clone(),
+            agent_name.clone(),
+            home_dir.clone(),
+        );
         info!(agent = %agent_name, count, "initial schedules loaded");
     }
 
@@ -76,7 +88,12 @@ pub async fn watch_and_reload(config_path: String, bus_socket: String, agent_nam
         match crate::config::UserConfig::load(&config_path) {
             Ok(cfg) => {
                 let added = cfg.schedules.len();
-                handles = start(cfg.schedules, bus_socket.clone(), agent_name.clone());
+                handles = start(
+                    cfg.schedules,
+                    bus_socket.clone(),
+                    agent_name.clone(),
+                    home_dir.clone(),
+                );
                 info!(agent = %agent_name, added, removed, "schedules reloaded");
             }
             Err(e) => {
@@ -90,7 +107,7 @@ fn file_mtime(path: &str) -> Option<std::time::SystemTime> {
     std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
-async fn run_schedule(def: ScheduleDef, bus_socket: String, agent_name: String) {
+async fn run_schedule(def: ScheduleDef, bus_socket: String, agent_name: String, home_dir: String) {
     let schedule = match Schedule::from_str(&def.cron) {
         Ok(s) => s,
         Err(e) => {
@@ -120,16 +137,16 @@ async fn run_schedule(def: ScheduleDef, bus_socket: String, agent_name: String) 
 
         info!(agent = %agent_name, target = %def.target, action = ?def.action, "schedule firing");
 
-        if let Err(e) = fire(&def, &bus_socket, &agent_name).await {
+        if let Err(e) = fire(&def, &bus_socket, &agent_name, &home_dir).await {
             warn!(agent = %agent_name, target = %def.target, error = %e, "schedule fire failed");
         }
     }
 }
 
-async fn fire(def: &ScheduleDef, bus_socket: &str, agent_name: &str) -> Result<()> {
+async fn fire(def: &ScheduleDef, bus_socket: &str, agent_name: &str, home_dir: &str) -> Result<()> {
     match def.action {
         ScheduleAction::Raw => fire_raw(def, bus_socket, agent_name).await,
-        ScheduleAction::GithubPoll => fire_github_poll(def, bus_socket, agent_name).await,
+        ScheduleAction::GithubPoll => fire_github_poll(def, bus_socket, agent_name, home_dir).await,
         ScheduleAction::Shell => fire_shell(def, bus_socket, agent_name).await,
     }
 }
@@ -153,9 +170,14 @@ async fn fire_raw(def: &ScheduleDef, bus_socket: &str, agent_name: &str) -> Resu
 ///   `events` — list of event types: "issues", "issue_comments"
 ///              (default: ["issues"] for backward compatibility)
 ///
-/// Uses `~/.deskd/github_poll_since.json` to track the last poll time per repo,
+/// Uses `{home_dir}/.deskd/github_poll_since.json` to track the last poll time per repo,
 /// so only new/updated items are posted on each cycle.
-async fn fire_github_poll(def: &ScheduleDef, bus_socket: &str, agent_name: &str) -> Result<()> {
+async fn fire_github_poll(
+    def: &ScheduleDef,
+    bus_socket: &str,
+    agent_name: &str,
+    home_dir: &str,
+) -> Result<()> {
     let cfg = match &def.config {
         Some(c) => c,
         None => {
@@ -190,7 +212,7 @@ async fn fire_github_poll(def: &ScheduleDef, bus_socket: &str, agent_name: &str)
         })
         .unwrap_or_default();
 
-    let mut since_state = load_since_state();
+    let mut since_state = load_since_state(home_dir);
 
     for repo in &repos {
         let since = since_state.get(repo).cloned().unwrap_or_else(|| {
@@ -253,7 +275,7 @@ async fn fire_github_poll(def: &ScheduleDef, bus_socket: &str, agent_name: &str)
         }
     }
 
-    save_since_state(&since_state);
+    save_since_state(home_dir, &since_state);
     Ok(())
 }
 
@@ -402,31 +424,54 @@ async fn poll_issue_comments(
 
 // ─── Since state persistence ────────────────────────────────────────────────
 
-/// Path to the since-state file: `~/.deskd/github_poll_since.json`
-fn since_state_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(home)
+/// Path to the since-state file: `{home_dir}/.deskd/github_poll_since.json`
+fn since_state_path(home_dir: &str) -> PathBuf {
+    PathBuf::from(home_dir)
         .join(".deskd")
         .join("github_poll_since.json")
 }
 
 /// Load the per-repo since timestamps from disk.
-fn load_since_state() -> HashMap<String, String> {
-    let path = since_state_path();
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+fn load_since_state(home_dir: &str) -> HashMap<String, String> {
+    let path = since_state_path(home_dir);
+    match std::fs::read_to_string(&path) {
+        Ok(s) => match serde_json::from_str(&s) {
+            Ok(state) => {
+                debug!(path = %path.display(), "loaded github_poll since state");
+                state
+            }
+            Err(e) => {
+                warn!(path = %path.display(), error = %e, "failed to parse since state, starting fresh");
+                HashMap::new()
+            }
+        },
+        Err(_) => {
+            info!(path = %path.display(), "no since state file, first poll will fetch recent items");
+            HashMap::new()
+        }
+    }
 }
 
 /// Persist the per-repo since timestamps to disk.
-fn save_since_state(state: &HashMap<String, String>) {
-    let path = since_state_path();
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+fn save_since_state(home_dir: &str, state: &HashMap<String, String>) {
+    let path = since_state_path(home_dir);
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        warn!(path = %parent.display(), error = %e, "failed to create since state directory");
+        return;
     }
-    if let Ok(json) = serde_json::to_string_pretty(state) {
-        let _ = std::fs::write(&path, json);
+    match serde_json::to_string_pretty(state) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, &json) {
+                warn!(path = %path.display(), error = %e, "failed to write since state file");
+            } else {
+                debug!(path = %path.display(), "saved github_poll since state");
+            }
+        }
+        Err(e) => {
+            warn!(error = %e, "failed to serialize since state");
+        }
     }
 }
 
@@ -613,19 +658,31 @@ mod tests {
     #[test]
     fn test_since_state_roundtrip() {
         let dir = std::env::temp_dir().join("deskd_test_since");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("github_poll_since.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        let home_dir = dir.to_string_lossy().to_string();
 
         let mut state = HashMap::new();
         state.insert("owner/repo".to_string(), "2026-03-27T10:00:00Z".to_string());
 
-        let json = serde_json::to_string_pretty(&state).unwrap();
-        std::fs::write(&path, &json).unwrap();
+        save_since_state(&home_dir, &state);
 
-        let loaded: HashMap<String, String> =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let loaded = load_since_state(&home_dir);
         assert_eq!(loaded.get("owner/repo").unwrap(), "2026-03-27T10:00:00Z");
 
+        // Verify file exists at expected path
+        let path = since_state_path(&home_dir);
+        assert!(path.exists(), "since state file should exist at {:?}", path);
+
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_since_state_missing_file_returns_empty() {
+        let dir = std::env::temp_dir().join("deskd_test_since_missing");
+        let _ = std::fs::remove_dir_all(&dir);
+        let home_dir = dir.to_string_lossy().to_string();
+
+        let state = load_since_state(&home_dir);
+        assert!(state.is_empty());
     }
 }
