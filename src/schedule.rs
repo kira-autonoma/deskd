@@ -159,7 +159,7 @@ async fn fire_raw(def: &ScheduleDef, bus_socket: &str, agent_name: &str) -> Resu
         .and_then(|c| c.as_str())
         .unwrap_or("scheduled event");
 
-    post_to_bus(bus_socket, agent_name, &def.target, text).await
+    post_to_bus(bus_socket, agent_name, &def.target, text, "schedule").await
 }
 
 /// Poll GitHub for issues, comments, and pull requests, post new events to the bus.
@@ -368,7 +368,7 @@ async fn poll_issues(
 
         let text = format!("GitHub issue {repo}#{number}: {title}\n{html_url}\n\n{body}");
         info!(agent = %agent_name, repo = %repo, issue = number, "posting github issue to bus");
-        if let Err(e) = post_to_bus(bus_socket, agent_name, target, &text).await {
+        if let Err(e) = post_to_bus(bus_socket, agent_name, target, &text, "github_poll").await {
             warn!(error = %e, "failed to post github issue to bus");
         }
         count += 1;
@@ -432,7 +432,7 @@ async fn poll_issue_comments(
         let text =
             format!("GitHub comment on {repo}#{issue_number} by {user}:\n{html_url}\n\n{body}");
         info!(agent = %agent_name, repo = %repo, issue = %issue_number, user = %user, "posting github comment to bus");
-        if let Err(e) = post_to_bus(bus_socket, agent_name, target, &text).await {
+        if let Err(e) = post_to_bus(bus_socket, agent_name, target, &text, "github_poll").await {
             warn!(error = %e, "failed to post github comment to bus");
         }
         count += 1;
@@ -502,7 +502,7 @@ async fn poll_pull_requests(
 
         let text = format!("New pull request {repo}#{number}: {title}\n{html_url}\n\n{body}");
         info!(agent = %agent_name, repo = %repo, pr = number, "posting github PR to bus");
-        if let Err(e) = post_to_bus(bus_socket, agent_name, target, &text).await {
+        if let Err(e) = post_to_bus(bus_socket, agent_name, target, &text, "github_poll").await {
             warn!(error = %e, "failed to post github PR to bus");
         }
         count += 1;
@@ -606,7 +606,7 @@ async fn fire_shell(def: &ScheduleDef, bus_socket: &str, agent_name: &str) -> Re
     let stdout = String::from_utf8_lossy(&output.stdout);
     let text = stdout.trim();
     if !text.is_empty() && !def.target.is_empty() {
-        post_to_bus(bus_socket, agent_name, &def.target, text).await?;
+        post_to_bus(bus_socket, agent_name, &def.target, text, "shell").await?;
     }
 
     Ok(())
@@ -674,6 +674,7 @@ pub async fn run_reminders(bus_socket: String, agent_name: String) {
                 &agent_name,
                 &reminder.target,
                 &reminder.message,
+                "reminder",
             )
             .await
             {
@@ -689,7 +690,14 @@ pub async fn run_reminders(bus_socket: String, agent_name: String) {
 }
 
 /// Post a task message to the bus.
-async fn post_to_bus(socket_path: &str, agent_name: &str, target: &str, text: &str) -> Result<()> {
+/// `source_label` identifies the schedule type (e.g. "github_poll", "reminder", "shell", "raw").
+async fn post_to_bus(
+    socket_path: &str,
+    agent_name: &str,
+    target: &str,
+    text: &str,
+    source_label: &str,
+) -> Result<()> {
     let mut stream = UnixStream::connect(socket_path)
         .await
         .with_context(|| format!("schedule: failed to connect to bus at {}", socket_path))?;
@@ -706,7 +714,7 @@ async fn post_to_bus(socket_path: &str, agent_name: &str, target: &str, text: &s
     let msg = serde_json::json!({
         "type": "message",
         "id": Uuid::new_v4().to_string(),
-        "source": format!("schedule-{}", agent_name),
+        "source": format!("{}-{}", source_label, agent_name),
         "target": target,
         "payload": {"task": text},
         "metadata": {"priority": 5u8},
