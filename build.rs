@@ -2,8 +2,25 @@ use std::process::Command;
 
 fn main() {
     // Embed short git hash at build time
-    let hash = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
+    let hash = git_output(&["rev-parse", "--short", "HEAD"]);
+    println!("cargo:rustc-env=GIT_HASH={hash}");
+
+    // Derive version from latest git tag (e.g. "v0.6.4" → "0.6.4").
+    // Falls back to CARGO_PKG_VERSION from Cargo.toml when no tag exists.
+    let version = git_output(&["describe", "--tags", "--abbrev=0"]);
+    if !version.is_empty() {
+        let version = version.strip_prefix('v').unwrap_or(&version);
+        println!("cargo:rustc-env=DESKD_VERSION={version}");
+    }
+
+    // Re-run if HEAD changes (new commit / tag)
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs/tags");
+}
+
+fn git_output(args: &[&str]) -> String {
+    Command::new("git")
+        .args(args)
         .output()
         .ok()
         .and_then(|o| {
@@ -13,10 +30,7 @@ fn main() {
                 None
             }
         })
-        .unwrap_or_default();
-
-    println!("cargo:rustc-env=GIT_HASH={}", hash.trim());
-
-    // Re-run if HEAD changes (new commit)
-    println!("cargo:rerun-if-changed=.git/HEAD");
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }

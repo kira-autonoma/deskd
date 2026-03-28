@@ -18,13 +18,15 @@ const DEFAULT_SOCKET: &str = "/tmp/deskd.sock";
 
 fn version_string() -> &'static str {
     // Constructed once via a static; includes git hash when available.
+    // Version comes from git tag (DESKD_VERSION) or falls back to Cargo.toml.
     static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     VERSION.get_or_init(|| {
+        let ver = option_env!("DESKD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
         let hash = env!("GIT_HASH");
         if hash.is_empty() {
-            env!("CARGO_PKG_VERSION").to_string()
+            ver.to_string()
         } else {
-            format!("{} ({})", env!("CARGO_PKG_VERSION"), hash)
+            format!("{ver} ({hash})")
         }
     })
 }
