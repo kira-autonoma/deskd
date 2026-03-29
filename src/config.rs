@@ -767,6 +767,7 @@ telegram:
             command: vec!["claude".into()],
             budget_usd: 50.0,
             container: None,
+            runtime: Default::default(),
         };
         assert_eq!(def.config_path(), "/home/family/deskd.yaml");
     }
@@ -785,6 +786,7 @@ telegram:
             command: vec!["claude".into()],
             budget_usd: 50.0,
             container: None,
+            runtime: Default::default(),
         };
         assert_eq!(def.config_path(), "/home/family/deskd.yaml");
     }
