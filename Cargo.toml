@@ -24,6 +24,10 @@ openssl = { version = "0.10", features = ["vendored"], optional = true }
 base64 = "0.22.1"
 futures = "0.3"
 
+[lib]
+name = "deskd"
+path = "src/lib.rs"
+
 [[bin]]
 name = "deskd"
 path = "src/main.rs"
