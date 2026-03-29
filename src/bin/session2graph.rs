@@ -1,5 +1,6 @@
 //! session2graph — Convert Claude Code session JSONL files into archlint-compatible
-//! architecture.yaml format, or compute metrics from the session graph.
+//! architecture.yaml format (using archlint's `components/links` schema), or compute
+//! metrics from the session graph.
 //!
 //! Usage:
 //!   session2graph <input.jsonl>                    # YAML graph to stdout
@@ -383,10 +384,10 @@ struct MetricsReport {
 
 #[derive(Serialize, Debug)]
 struct MetricsSummary {
-    total_nodes: usize,
-    total_edges: usize,
-    nodes_by_type: HashMap<String, usize>,
-    edges_by_type: HashMap<String, usize>,
+    total_components: usize,
+    total_links: usize,
+    components_by_type: HashMap<String, usize>,
+    links_by_type: HashMap<String, usize>,
 }
 
 #[derive(Serialize, Debug)]
@@ -419,22 +420,22 @@ struct SessionStats {
 }
 
 fn compute_metrics(graph: &ArchGraph) -> MetricsReport {
-    // Summary: nodes by type, edges by type
-    let mut nodes_by_type: HashMap<String, usize> = HashMap::new();
+    // Summary: components by type, links by type
+    let mut components_by_type: HashMap<String, usize> = HashMap::new();
     for comp in &graph.components {
-        *nodes_by_type.entry(comp.entity.clone()).or_default() += 1;
+        *components_by_type.entry(comp.entity.clone()).or_default() += 1;
     }
 
-    let mut edges_by_type: HashMap<String, usize> = HashMap::new();
+    let mut links_by_type: HashMap<String, usize> = HashMap::new();
     for link in &graph.links {
-        *edges_by_type.entry(link.r#type.clone()).or_default() += 1;
+        *links_by_type.entry(link.r#type.clone()).or_default() += 1;
     }
 
     let summary = MetricsSummary {
-        total_nodes: graph.components.len(),
-        total_edges: graph.links.len(),
-        nodes_by_type,
-        edges_by_type,
+        total_components: graph.components.len(),
+        total_links: graph.links.len(),
+        components_by_type,
+        links_by_type,
     };
 
     // Tool usage: count per tool name from tool_use titles
@@ -454,7 +455,7 @@ fn compute_metrics(graph: &ArchGraph) -> MetricsReport {
         .collect();
     tool_usage.sort_by(|a, b| b.count.cmp(&a.count));
 
-    // Fan-out: outgoing edges per node
+    // Fan-out: outgoing links per component
     let mut outgoing: HashMap<String, usize> = HashMap::new();
     for link in &graph.links {
         *outgoing.entry(link.from.clone()).or_default() += 1;
@@ -464,11 +465,11 @@ fn compute_metrics(graph: &ArchGraph) -> MetricsReport {
         Some((node, count)) => (node.clone(), *count),
         None => (String::new(), 0),
     };
-    let total_nodes_with_edges = outgoing.len();
+    let total_components_with_links = outgoing.len();
     let sum_outgoing: usize = outgoing.values().sum();
-    let average = if total_nodes_with_edges > 0 {
+    let average = if total_components_with_links > 0 {
         // Round to 1 decimal
-        ((sum_outgoing as f64 / total_nodes_with_edges as f64) * 10.0).round() / 10.0
+        ((sum_outgoing as f64 / total_components_with_links as f64) * 10.0).round() / 10.0
     } else {
         0.0
     };
@@ -619,7 +620,7 @@ mod tests {
         assert!(graph.components[3].title.contains("chars]"));
         assert!(graph.components[5].title.contains("Edit"));
 
-        // Check links exist
+        // Check edges exist
         assert!(!graph.links.is_empty());
 
         // user -> assistant response link
@@ -708,17 +709,17 @@ mod tests {
         let graph = convert(FIXTURE).unwrap();
         let report = compute_metrics(&graph);
 
-        assert_eq!(report.summary.total_nodes, 6);
-        assert_eq!(report.summary.total_edges, 5);
+        assert_eq!(report.summary.total_components, 6);
+        assert_eq!(report.summary.total_links, 5);
 
-        assert_eq!(report.summary.nodes_by_type["user_message"], 1);
-        assert_eq!(report.summary.nodes_by_type["assistant_message"], 2);
-        assert_eq!(report.summary.nodes_by_type["tool_use"], 2);
-        assert_eq!(report.summary.nodes_by_type["tool_result"], 1);
+        assert_eq!(report.summary.components_by_type["user_message"], 1);
+        assert_eq!(report.summary.components_by_type["assistant_message"], 2);
+        assert_eq!(report.summary.components_by_type["tool_use"], 2);
+        assert_eq!(report.summary.components_by_type["tool_result"], 1);
 
-        assert_eq!(report.summary.edges_by_type["response"], 2);
-        assert_eq!(report.summary.edges_by_type["invocation"], 2);
-        assert_eq!(report.summary.edges_by_type["result"], 1);
+        assert_eq!(report.summary.links_by_type["response"], 2);
+        assert_eq!(report.summary.links_by_type["invocation"], 2);
+        assert_eq!(report.summary.links_by_type["result"], 1);
     }
 
     #[test]
@@ -806,8 +807,8 @@ mod tests {
         let graph = convert("").unwrap();
         let report = compute_metrics(&graph);
 
-        assert_eq!(report.summary.total_nodes, 0);
-        assert_eq!(report.summary.total_edges, 0);
+        assert_eq!(report.summary.total_components, 0);
+        assert_eq!(report.summary.total_links, 0);
         assert!(report.tool_usage.is_empty());
         assert_eq!(report.fan_out.max, 0);
         assert_eq!(report.fan_out.average, 0.0);
@@ -825,7 +826,7 @@ mod tests {
         let report = compute_metrics(&graph);
 
         assert_eq!(report.session_stats.thinking_blocks, 1);
-        assert_eq!(report.summary.nodes_by_type["thinking"], 1);
+        assert_eq!(report.summary.components_by_type["thinking"], 1);
     }
 
     #[test]
