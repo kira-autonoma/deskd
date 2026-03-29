@@ -1,0 +1,128 @@
+graph: pr-review-merge
+version: 1
+description: >
+  Review and merge a PR: check CI, review diff, rebase on main,
+  run quality checks, squash merge, tag, notify Telegram.
+
+steps:
+  - id: check_ci
+    tools:
+      - tool: bash
+        args: "gh pr checks {pr_number} --repo {repo} 2>&1 || true"
+      - tool: bash
+        args: "gh pr view {pr_number} --repo {repo} --json mergeable,headRefName,title,body,statusCheckRollup 2>&1"
+
+  - id: review_diff
+    tools:
+      - tool: bash
+        args: "gh pr diff {pr_number} --repo {repo} 2>&1"
+
+  - id: decide_merge
+    type: llm
+    depends_on: [check_ci, review_diff]
+    prompt: |
+      You are reviewing PR #{pr_number} in {repo}.
+
+      Based on CI status and the diff, decide:
+      1. Is CI passing? (ignore archlint failures — only cargo check/test/clippy matter)
+      2. Is the code quality acceptable? Any bugs, security issues, or bad patterns?
+      3. Is it mergeable (no conflicts)?
+
+      Respond with JSON:
+      ```json
+      {
+        "action": "merge" or "comment",
+        "branch": "the head branch name",
+        "title": "PR title for commit message",
+        "issues": ["list of issues if action is comment, empty if merge"]
+      }
+      ```
+
+  - id: fetch_branch
+    depends_on: [decide_merge]
+    condition: "'merge' in action"
+    tools:
+      - tool: bash
+        args: "cd {work_dir} && git fetch origin && git fetch kira 2>&1 || true"
+
+  - id: rebase_branch
+    depends_on: [fetch_branch]
+    condition: "'merge' in action"
+    tools:
+      - tool: bash
+        args: "cd {work_dir} && git checkout -b _pr_{pr_number} kira/{branch} 2>&1 && git rebase main 2>&1"
+
+  - id: quality_check
+    depends_on: [rebase_branch]
+    condition: "'merge' in action"
+    parallel: true
+    tools:
+      - tool: bash
+        args: "cd {work_dir} && ~/.cargo/bin/cargo fmt --check 2>&1"
+      - tool: bash
+        args: "cd {work_dir} && ~/.cargo/bin/cargo clippy -- -D warnings 2>&1"
+
+  - id: fix_fmt
+    depends_on: [quality_check]
+    condition: "'merge' in action"
+    tools:
+      - tool: bash
+        args: "cd {work_dir} && ~/.cargo/bin/cargo fmt 2>&1"
+
+  - id: squash_merge
+    depends_on: [fix_fmt]
+    condition: "'merge' in action"
+    tools:
+      - tool: bash
+        args: >
+          cd {work_dir} &&
+          git checkout main &&
+          git merge --squash _pr_{pr_number} &&
+          git commit -m "{title} (#{pr_number})" &&
+          git push origin main 2>&1
+
+  - id: cleanup_branch
+    depends_on: [squash_merge]
+    condition: "'merge' in action"
+    tools:
+      - tool: bash
+        args: "cd {work_dir} && git branch -D _pr_{pr_number} 2>&1"
+
+  - id: close_pr
+    depends_on: [squash_merge]
+    condition: "'merge' in action"
+    tools:
+      - tool: bash
+        args: "gh pr close {pr_number} --repo {repo} --comment 'Merged to main via skill graph.' 2>&1"
+
+  - id: tag_release
+    depends_on: [squash_merge]
+    condition: "'merge' in action"
+    tools:
+      - tool: bash
+        args: >
+          cd {work_dir} &&
+          LATEST=$(git tag -l 'v*' | sort -V | tail -1) &&
+          MAJOR=$(echo $LATEST | cut -d. -f1) &&
+          MINOR=$(echo $LATEST | cut -d. -f2) &&
+          PATCH=$(echo $LATEST | cut -d. -f3) &&
+          NEXT="$MAJOR.$MINOR.$((PATCH+1))" &&
+          git tag $NEXT &&
+          git push origin $NEXT 2>&1 &&
+          echo "tagged: $NEXT"
+
+  - id: comment_issues
+    depends_on: [decide_merge]
+    condition: "'comment' in action"
+    tools:
+      - tool: bash
+        args: "gh pr review {pr_number} --repo {repo} --comment --body '{issues}' 2>&1"
+
+  - id: notify_telegram
+    depends_on: [tag_release, comment_issues]
+    type: llm
+    prompt: |
+      Based on the results, compose a brief Telegram notification (2-3 lines).
+      If merged: mention PR number, title, new tag.
+      If commented: mention PR number and what needs fixing.
+      Output just the message text, nothing else.
