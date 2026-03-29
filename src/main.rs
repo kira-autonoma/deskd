@@ -207,6 +207,9 @@ enum AgentAction {
         /// Show cost summary instead of task list.
         #[arg(long, default_value = "false")]
         cost: bool,
+        /// Show token usage grouped by GitHub PR.
+        #[arg(long, default_value = "false")]
+        by_pr: bool,
     },
     /// Remove an agent (state file + log).
     Rm { name: String },
@@ -544,6 +547,7 @@ async fn main() -> anyhow::Result<()> {
                 since,
                 json,
                 cost,
+                by_pr,
             } => {
                 let since_dt = if let Some(ref dur) = since {
                     let secs = parse_duration_secs(dur)?;
@@ -554,13 +558,15 @@ async fn main() -> anyhow::Result<()> {
 
                 let entries = tasklog::read_logs(
                     &name,
-                    if cost { usize::MAX } else { limit },
+                    if cost || by_pr { usize::MAX } else { limit },
                     source.as_deref(),
                     since_dt,
                 )?;
 
                 if entries.is_empty() {
                     println!("No task logs for {}", name);
+                } else if by_pr {
+                    tasklog::print_pr_summary(&name, &entries, since.as_deref());
                 } else if cost {
                     tasklog::print_cost_summary(&name, &entries, since.as_deref());
                 } else if json {

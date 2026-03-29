@@ -28,6 +28,18 @@ pub struct TaskLog {
     pub error: Option<String>,
     /// Message ID from the bus envelope.
     pub msg_id: String,
+    /// GitHub repo (e.g. "owner/repo") — set when task originated from github_poll.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub github_repo: Option<String>,
+    /// GitHub PR number — set when task is about a pull request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub github_pr: Option<u64>,
+    /// Input tokens consumed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    /// Output tokens produced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
 }
 
 /// Return the path to the task log file for a given agent.
@@ -258,6 +270,120 @@ pub fn print_cost_summary(agent_name: &str, entries: &[TaskLog], since_label: Op
     }
 }
 
+/// Print per-PR token usage summary.
+pub fn print_pr_summary(agent_name: &str, entries: &[TaskLog], since_label: Option<&str>) {
+    use std::collections::HashMap;
+
+    println!("Agent: {}", agent_name);
+    if let Some(label) = since_label {
+        println!("Period: last {}", label);
+    }
+    println!();
+
+    // Group by (repo, pr_number).
+    struct PrStats {
+        tasks: usize,
+        cost: f64,
+        turns: u32,
+        input_tokens: u64,
+        output_tokens: u64,
+        duration_ms: u64,
+    }
+
+    let mut by_pr: HashMap<String, PrStats> = HashMap::new();
+    let mut no_pr_stats = PrStats {
+        tasks: 0,
+        cost: 0.0,
+        turns: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        duration_ms: 0,
+    };
+
+    for e in entries {
+        let stats = if let (Some(repo), Some(pr)) = (&e.github_repo, e.github_pr) {
+            by_pr.entry(format!("{}#{}", repo, pr)).or_insert(PrStats {
+                tasks: 0,
+                cost: 0.0,
+                turns: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                duration_ms: 0,
+            })
+        } else {
+            &mut no_pr_stats
+        };
+        stats.tasks += 1;
+        stats.cost += e.cost;
+        stats.turns += e.turns;
+        stats.input_tokens += e.input_tokens.unwrap_or(0);
+        stats.output_tokens += e.output_tokens.unwrap_or(0);
+        stats.duration_ms += e.duration_ms;
+    }
+
+    if by_pr.is_empty() {
+        println!("No PR-linked tasks found.");
+        return;
+    }
+
+    // Sort by cost descending.
+    let mut prs: Vec<_> = by_pr.into_iter().collect();
+    prs.sort_by(|a, b| {
+        b.1.cost
+            .partial_cmp(&a.1.cost)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let total_cost: f64 = prs.iter().map(|(_, s)| s.cost).sum::<f64>() + no_pr_stats.cost;
+
+    println!(
+        "{:<30} {:>5}  {:>7}  {:>8}  {:>8}  {:>9}",
+        "PR", "TASKS", "COST", "IN_TOK", "OUT_TOK", "DURATION"
+    );
+    println!("{}", "─".repeat(75));
+
+    for (pr, s) in &prs {
+        println!(
+            "{:<30} {:>5}  ${:>6.2}  {:>8}  {:>8}  {:>9}",
+            pr,
+            s.tasks,
+            s.cost,
+            format_tokens(s.input_tokens),
+            format_tokens(s.output_tokens),
+            format_duration(s.duration_ms),
+        );
+    }
+
+    if no_pr_stats.tasks > 0 {
+        println!(
+            "{:<30} {:>5}  ${:>6.2}  {:>8}  {:>8}  {:>9}",
+            "(no PR)",
+            no_pr_stats.tasks,
+            no_pr_stats.cost,
+            format_tokens(no_pr_stats.input_tokens),
+            format_tokens(no_pr_stats.output_tokens),
+            format_duration(no_pr_stats.duration_ms),
+        );
+    }
+
+    println!("{}", "─".repeat(75));
+    let total_tasks: usize = prs.iter().map(|(_, s)| s.tasks).sum::<usize>() + no_pr_stats.tasks;
+    println!("{:<30} {:>5}  ${:>6.2}", "TOTAL", total_tasks, total_cost);
+}
+
+/// Format token count as human-readable (e.g. "1.2K", "45K", "1.1M").
+fn format_tokens(n: u64) -> String {
+    if n == 0 {
+        "-".to_string()
+    } else if n < 1_000 {
+        format!("{}", n)
+    } else if n < 1_000_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    }
+}
+
 /// Truncate a string to at most `max` characters, respecting char boundaries.
 pub fn truncate_task(s: &str, max: usize) -> String {
     if s.len() <= max {
@@ -314,6 +440,10 @@ mod tests {
             task: task.to_string(),
             error: None,
             msg_id: "test-uuid".to_string(),
+            github_repo: None,
+            github_pr: None,
+            input_tokens: None,
+            output_tokens: None,
         }
     }
 
@@ -361,6 +491,10 @@ mod tests {
                     task: format!("task {}", i),
                     error: None,
                     msg_id: format!("id-{}", i),
+                    github_repo: None,
+                    github_pr: None,
+                    input_tokens: None,
+                    output_tokens: None,
                 };
                 let line = serde_json::to_string(&entry).unwrap();
                 writeln!(file, "{}", line).unwrap();
@@ -396,6 +530,45 @@ mod tests {
         assert_eq!(entries[0].task, "recent task");
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_pr_summary_does_not_panic() {
+        let entries = vec![
+            TaskLog {
+                github_repo: Some("kgatilin/deskd".to_string()),
+                github_pr: Some(42),
+                input_tokens: Some(5000),
+                output_tokens: Some(1200),
+                ..test_entry("github_poll", "PR review", "2026-03-28T14:00:00Z")
+            },
+            TaskLog {
+                github_repo: Some("kgatilin/deskd".to_string()),
+                github_pr: Some(42),
+                input_tokens: Some(3000),
+                output_tokens: Some(800),
+                ..test_entry("github_poll", "PR follow-up", "2026-03-28T15:00:00Z")
+            },
+            TaskLog {
+                github_repo: Some("kgatilin/deskd".to_string()),
+                github_pr: Some(43),
+                input_tokens: Some(2000),
+                output_tokens: Some(500),
+                ..test_entry("github_poll", "Another PR", "2026-03-28T16:00:00Z")
+            },
+            test_entry("telegram", "Non-PR task", "2026-03-28T17:00:00Z"),
+        ];
+        // Verify it doesn't panic.
+        print_pr_summary("test", &entries, Some("24h"));
+    }
+
+    #[test]
+    fn test_format_tokens() {
+        assert_eq!(format_tokens(0), "-");
+        assert_eq!(format_tokens(500), "500");
+        assert_eq!(format_tokens(1500), "1.5K");
+        assert_eq!(format_tokens(45000), "45.0K");
+        assert_eq!(format_tokens(1_500_000), "1.5M");
     }
 
     #[test]

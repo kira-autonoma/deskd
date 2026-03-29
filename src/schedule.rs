@@ -404,7 +404,17 @@ async fn poll_issues(
             warn!(repo = %repo, error = %e, "failed to write github issue to unified inbox");
         }
 
-        if let Err(e) = post_to_bus(bus_socket, agent_name, target, &text, "github_poll").await {
+        if let Err(e) = post_to_bus_with_github(
+            bus_socket,
+            agent_name,
+            target,
+            &text,
+            "github_poll",
+            repo,
+            None, // issues don't have a PR number
+        )
+        .await
+        {
             warn!(error = %e, "failed to post github issue to bus");
         }
         count += 1;
@@ -487,7 +497,17 @@ async fn poll_issue_comments(
             warn!(repo = %repo, error = %e, "failed to write github comment to unified inbox");
         }
 
-        if let Err(e) = post_to_bus(bus_socket, agent_name, target, &text, "github_poll").await {
+        if let Err(e) = post_to_bus_with_github(
+            bus_socket,
+            agent_name,
+            target,
+            &text,
+            "github_poll",
+            repo,
+            None, // issue comments — not a PR
+        )
+        .await
+        {
             warn!(error = %e, "failed to post github comment to bus");
         }
         count += 1;
@@ -576,7 +596,17 @@ async fn poll_pull_requests(
             warn!(repo = %repo, error = %e, "failed to write github PR to unified inbox");
         }
 
-        if let Err(e) = post_to_bus(bus_socket, agent_name, target, &text, "github_poll").await {
+        if let Err(e) = post_to_bus_with_github(
+            bus_socket,
+            agent_name,
+            target,
+            &text,
+            "github_poll",
+            repo,
+            Some(number),
+        )
+        .await
+        {
             warn!(error = %e, "failed to post github PR to bus");
         }
         count += 1;
@@ -807,12 +837,24 @@ async fn post_to_bus(
     line.push('\n');
     stream.write_all(line.as_bytes()).await?;
 
+    let payload = serde_json::json!({"task": text});
+    post_payload_to_stream(&mut stream, agent_name, target, &payload, source_label).await
+}
+
+/// Post a message with custom payload to an already-connected bus stream.
+async fn post_payload_to_stream(
+    stream: &mut UnixStream,
+    agent_name: &str,
+    target: &str,
+    payload: &serde_json::Value,
+    source_label: &str,
+) -> Result<()> {
     let msg = serde_json::json!({
         "type": "message",
         "id": Uuid::new_v4().to_string(),
         "source": format!("{}-{}", source_label, agent_name),
         "target": target,
-        "payload": {"task": text},
+        "payload": payload,
         "metadata": {"priority": 5u8},
     });
     let mut msg_line = serde_json::to_string(&msg)?;
@@ -820,6 +862,40 @@ async fn post_to_bus(
     stream.write_all(msg_line.as_bytes()).await?;
 
     Ok(())
+}
+
+/// Post a message with github metadata to the bus.
+async fn post_to_bus_with_github(
+    socket_path: &str,
+    agent_name: &str,
+    target: &str,
+    text: &str,
+    source_label: &str,
+    github_repo: &str,
+    github_pr: Option<u64>,
+) -> Result<()> {
+    let mut stream = UnixStream::connect(socket_path)
+        .await
+        .with_context(|| format!("schedule: failed to connect to bus at {}", socket_path))?;
+
+    let reg = serde_json::json!({
+        "type": "register",
+        "name": format!("schedule-{}-{}", agent_name, Uuid::new_v4()),
+        "subscriptions": [],
+    });
+    let mut line = serde_json::to_string(&reg)?;
+    line.push('\n');
+    stream.write_all(line.as_bytes()).await?;
+
+    let mut payload = serde_json::json!({
+        "task": text,
+        "github_repo": github_repo,
+    });
+    if let Some(pr) = github_pr {
+        payload["github_pr"] = serde_json::json!(pr);
+    }
+
+    post_payload_to_stream(&mut stream, agent_name, target, &payload, source_label).await
 }
 
 #[cfg(test)]

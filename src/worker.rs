@@ -238,6 +238,14 @@ pub async fn run(
             }
         };
 
+        // Extract optional github metadata from payload (set by github_poll).
+        let github_repo = msg
+            .payload
+            .get("github_repo")
+            .and_then(|r| r.as_str())
+            .map(str::to_string);
+        let github_pr = msg.payload.get("github_pr").and_then(|p| p.as_u64());
+
         // Check budget against the configured cap.
         let current_state = agent::load_state(name)?;
         if current_state.total_cost >= budget_usd {
@@ -264,6 +272,10 @@ pub async fn run(
                 task: tasklog::truncate_task(skip_task, 60),
                 error: Some("budget exceeded".to_string()),
                 msg_id: msg.id.clone(),
+                github_repo: github_repo.clone(),
+                github_pr,
+                input_tokens: None,
+                output_tokens: None,
             };
             if let Err(e) = tasklog::log_task(name, &log_entry) {
                 warn!(agent = %name, error = %e, "failed to write task log");
@@ -304,6 +316,10 @@ pub async fn run(
                 task: String::new(),
                 error: None,
                 msg_id: msg.id.clone(),
+                github_repo: github_repo.clone(),
+                github_pr,
+                input_tokens: None,
+                output_tokens: None,
             };
             if let Err(e) = tasklog::log_task(name, &log_entry) {
                 warn!(agent = %name, error = %e, "failed to write task log");
@@ -610,6 +626,8 @@ pub async fn run(
                     &turn.token_usage,
                     task_duration,
                     &initial_state.config.model,
+                    github_repo.as_deref(),
+                    github_pr,
                 );
 
                 // Log task completion.
@@ -623,6 +641,10 @@ pub async fn run(
                     task: tasklog::truncate_task(task_raw, 60),
                     error: None,
                     msg_id: msg.id.clone(),
+                    github_repo: github_repo.clone(),
+                    github_pr,
+                    input_tokens: Some(turn.token_usage.input_tokens),
+                    output_tokens: Some(turn.token_usage.output_tokens),
                 };
                 if let Err(e) = tasklog::log_task(name, &log_entry) {
                     warn!(agent = %name, error = %e, "failed to write task log");
@@ -662,6 +684,10 @@ pub async fn run(
                     task: tasklog::truncate_task(task_raw, 60),
                     error: Some(err_str.clone()),
                     msg_id: msg.id.clone(),
+                    github_repo: github_repo.clone(),
+                    github_pr,
+                    input_tokens: None,
+                    output_tokens: None,
                 };
                 if let Err(le) = tasklog::log_task(name, &log_entry) {
                     warn!(agent = %name, error = %le, "failed to write task log");
@@ -699,6 +725,7 @@ pub async fn run(
 }
 
 /// Log token usage for a completed task to a JSONL file.
+#[allow(clippy::too_many_arguments)]
 fn log_token_usage(
     work_dir: &str,
     agent_name: &str,
@@ -707,6 +734,8 @@ fn log_token_usage(
     usage: &TokenUsage,
     duration_secs: u64,
     model: &str,
+    github_repo: Option<&str>,
+    github_pr: Option<u64>,
 ) {
     let deskd_dir = std::path::Path::new(work_dir).join(".deskd");
     if let Err(e) = std::fs::create_dir_all(&deskd_dir) {
@@ -725,7 +754,7 @@ fn log_token_usage(
         task
     };
 
-    let entry = serde_json::json!({
+    let mut entry = serde_json::json!({
         "timestamp": chrono::Utc::now().to_rfc3339(),
         "agent": agent_name,
         "source": source,
@@ -737,6 +766,12 @@ fn log_token_usage(
         "duration_secs": duration_secs,
         "model": model,
     });
+    if let Some(repo) = github_repo {
+        entry["github_repo"] = serde_json::json!(repo);
+    }
+    if let Some(pr) = github_pr {
+        entry["github_pr"] = serde_json::json!(pr);
+    }
 
     match std::fs::OpenOptions::new()
         .create(true)
