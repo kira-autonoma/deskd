@@ -420,6 +420,7 @@ pub async fn run(
         let writer_fwd = writer.clone();
         let name_owned = name.to_string();
         let reply_owned = reply_target.clone();
+        let msg_id_owned = msg.id.clone();
         let fwd_chat_id = telegram_chat_id;
         let fwd_task = tokio::spawn(async move {
             let mut full_response = String::new();
@@ -454,7 +455,7 @@ pub async fn run(
                         &writer_fwd,
                         &name_owned,
                         &reply_owned,
-                        serde_json::json!({"result": text}),
+                        serde_json::json!({"result": text, "in_reply_to": msg_id_owned}),
                     )
                     .await;
                 }
