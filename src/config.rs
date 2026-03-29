@@ -66,6 +66,9 @@ fn default_budget_usd() -> f64 {
 pub struct WorkspaceConfig {
     #[serde(default)]
     pub agents: Vec<AgentDef>,
+    /// Telegram user IDs allowed to run admin commands (/restart, etc.).
+    #[serde(default)]
+    pub admin_telegram_ids: Vec<i64>,
 }
 
 /// Telegram bot adapter config. Defined per-agent — each agent has its own bot.
@@ -505,6 +508,31 @@ agents:
         assert_eq!(cfg.agents[0].unix_user.as_deref(), Some("kira"));
         assert!(cfg.agents[0].telegram.is_none());
         assert!(cfg.agents[0].config.is_none());
+    }
+
+    #[test]
+    fn test_workspace_config_admin_telegram_ids() {
+        let yaml = r#"
+agents:
+  - name: kira
+    work_dir: /home/kira
+admin_telegram_ids:
+  - 123456789
+  - 987654321
+"#;
+        let cfg: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.admin_telegram_ids, vec![123456789i64, 987654321i64]);
+    }
+
+    #[test]
+    fn test_workspace_config_admin_telegram_ids_default() {
+        let yaml = r#"
+agents:
+  - name: kira
+    work_dir: /home/kira
+"#;
+        let cfg: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.admin_telegram_ids.is_empty());
     }
 
     #[test]

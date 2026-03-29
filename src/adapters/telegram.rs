@@ -88,11 +88,23 @@ struct SenderInfo {
 pub struct TelegramAdapter {
     token: String,
     routes: Vec<TelegramRoute>,
+    admin_telegram_ids: Vec<i64>,
+    agent_name: String,
 }
 
 impl TelegramAdapter {
-    pub fn new(token: String, routes: Vec<TelegramRoute>) -> Self {
-        Self { token, routes }
+    pub fn new(
+        token: String,
+        routes: Vec<TelegramRoute>,
+        admin_telegram_ids: Vec<i64>,
+        agent_name: String,
+    ) -> Self {
+        Self {
+            token,
+            routes,
+            admin_telegram_ids,
+            agent_name,
+        }
     }
 }
 
@@ -101,7 +113,7 @@ impl super::Adapter for TelegramAdapter {
         "telegram"
     }
 
-    fn run(self: Box<Self>, bus_socket: String, agent_name: String) -> super::BoxFuture {
+    fn run(self: Box<Self>, bus_socket: String, _agent_name: String) -> super::BoxFuture {
         let allowed_chats = self.routes.iter().map(|r| r.chat_id).collect();
         let mention_only = self
             .routes
@@ -119,6 +131,7 @@ impl super::Adapter for TelegramAdapter {
             .iter()
             .filter_map(|r| r.route_to.as_ref().map(|t| (r.chat_id, t.clone())))
             .collect();
+        let agent_name = self.agent_name;
         Box::pin(run(
             self.token,
             bus_socket,
@@ -127,6 +140,7 @@ impl super::Adapter for TelegramAdapter {
             mention_only,
             chat_names,
             chat_route_to,
+            self.admin_telegram_ids,
         ))
     }
 }
@@ -146,6 +160,7 @@ enum OutboundCmd {
 /// `mention_only_chats` is a subset where only @mentions trigger the agent.
 /// `chat_names` maps chat_id to a human-readable name shown to the agent as context.
 /// `chat_route_to` maps chat_id to a bus target override (e.g. "agent:collab").
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     token: String,
     socket_path: String,
@@ -154,6 +169,7 @@ pub async fn run(
     mention_only_chats: Vec<i64>,
     chat_names: std::collections::HashMap<i64, String>,
     chat_route_to: std::collections::HashMap<i64, String>,
+    admin_telegram_ids: Vec<i64>,
 ) -> Result<()> {
     info!(agent = %agent_name, "starting Telegram adapter");
 
@@ -206,6 +222,7 @@ pub async fn run(
                 mention_only,
                 chat_names,
                 chat_route_to,
+                admin_telegram_ids,
             )
             .await
             {
@@ -483,7 +500,9 @@ async fn polling_loop(
     mention_only_chats: std::collections::HashSet<i64>,
     chat_names: std::collections::HashMap<i64, String>,
     chat_route_to: std::collections::HashMap<i64, String>,
+    admin_telegram_ids: Vec<i64>,
 ) -> Result<()> {
+    let admin_ids: std::collections::HashSet<i64> = admin_telegram_ids.into_iter().collect();
     teloxide::repl(bot, move |bot: Bot, msg: Message| {
         let socket = socket_path.clone();
         let agent = agent_name.clone();
@@ -492,6 +511,7 @@ async fn polling_loop(
         let mention_only = mention_only_chats.clone();
         let names = chat_names.clone();
         let route_to_map = chat_route_to.clone();
+        let admins = admin_ids.clone();
         async move {
             // Skip messages from the bot itself to prevent reply loops.
             if msg.from.as_ref().map(|u| u.username.as_deref() == Some(&bot_user)).unwrap_or(false) {
@@ -536,6 +556,31 @@ async fn polling_loop(
                 // Whitelist check — only process chats explicitly configured in routes.
                 if !allowed.is_empty() && !allowed.contains(&chat_id) {
                     debug!(agent = %agent, chat_id = chat_id, "ignoring message — chat not in whitelist");
+                    return Ok(());
+                }
+
+                // ── Slash command interception ──────────────────────────────
+                // Handle /status and /restart locally without forwarding to
+                // the agent.  This runs AFTER the whitelist check so that
+                // only authorised chats can invoke these commands.
+                let cmd = text.trim();
+                // Strip @botname suffix for group chats (e.g. "/status@my_bot")
+                let cmd_base = cmd.split('@').next().unwrap_or(cmd);
+                if cmd_base == "/status" {
+                    let reply = format_status_reply(&agent);
+                    let _ = bot.send_message(msg.chat.id, reply).await;
+                    return Ok(());
+                }
+                if cmd_base == "/restart" {
+                    let sender_id = msg.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(0);
+                    if !admins.contains(&sender_id) {
+                        let _ = bot
+                            .send_message(msg.chat.id, "Permission denied. Admin access required.")
+                            .await;
+                        return Ok(());
+                    }
+                    let reply = handle_restart_command(&agent, &socket).await;
+                    let _ = bot.send_message(msg.chat.id, reply).await;
                     return Ok(());
                 }
 
@@ -603,6 +648,80 @@ async fn polling_loop(
         }
     })
     .await;
+
+    Ok(())
+}
+
+/// Format a /status reply by reading the agent state file.
+fn format_status_reply(agent_name: &str) -> String {
+    match crate::agent::load_state(agent_name) {
+        Ok(state) => {
+            let uptime = match chrono::DateTime::parse_from_rfc3339(&state.created_at) {
+                Ok(created) => {
+                    let dur = chrono::Utc::now().signed_duration_since(created);
+                    if dur.num_days() > 0 {
+                        format!("{}d {}h", dur.num_days(), dur.num_hours() % 24)
+                    } else if dur.num_hours() > 0 {
+                        format!("{}h {}m", dur.num_hours(), dur.num_minutes() % 60)
+                    } else {
+                        format!("{}m", dur.num_minutes())
+                    }
+                }
+                Err(_) => "unknown".to_string(),
+            };
+            format!(
+                "Agent: {}\nStatus: {}\nSession age: {}\nTotal cost: ${:.2}\nTurns: {}\nModel: {}",
+                agent_name,
+                state.status,
+                uptime,
+                state.total_cost,
+                state.total_turns,
+                state.config.model,
+            )
+        }
+        Err(e) => {
+            format!("Agent '{}': state unavailable ({})", agent_name, e)
+        }
+    }
+}
+
+/// Handle /restart command: send a restart message to the bus.
+async fn handle_restart_command(agent_name: &str, socket_path: &str) -> String {
+    match publish_restart_to_bus(socket_path, agent_name).await {
+        Ok(()) => format!("Restart signal sent for agent '{}'.", agent_name),
+        Err(e) => format!("Failed to send restart signal: {}", e),
+    }
+}
+
+/// Publish a restart command to the bus targeting the agent's worker.
+async fn publish_restart_to_bus(socket_path: &str, agent_name: &str) -> Result<()> {
+    let mut stream = UnixStream::connect(socket_path)
+        .await
+        .with_context(|| format!("failed to connect to bus at {}", socket_path))?;
+
+    let reg = serde_json::json!({
+        "type": "register",
+        "name": format!("telegram-restart-{}", Uuid::new_v4()),
+        "subscriptions": [],
+    });
+    let mut reg_line = serde_json::to_string(&reg)?;
+    reg_line.push('\n');
+    stream.write_all(reg_line.as_bytes()).await?;
+    stream.flush().await?;
+
+    let msg = serde_json::json!({
+        "type": "message",
+        "id": Uuid::new_v4().to_string(),
+        "source": format!("telegram-{}", agent_name),
+        "target": format!("agent:{}", agent_name),
+        "payload": {
+            "command": "restart",
+        },
+    });
+    let mut msg_line = serde_json::to_string(&msg)?;
+    msg_line.push('\n');
+    stream.write_all(msg_line.as_bytes()).await?;
+    stream.flush().await?;
 
     Ok(())
 }
@@ -1091,6 +1210,21 @@ mod tests {
         assert!(text.len() < TELEGRAM_MAX_LEN);
         let chunks = split_message(&text);
         assert_eq!(chunks.len(), 1);
+    }
+
+    #[test]
+    fn test_format_status_reply_no_state() {
+        // Agent that doesn't exist should return an error message.
+        let reply = format_status_reply("nonexistent_agent_xyz_12345");
+        assert!(reply.contains("nonexistent_agent_xyz_12345"));
+        assert!(reply.contains("unavailable"));
+    }
+
+    #[test]
+    fn test_format_status_reply_missing_agent() {
+        let reply = format_status_reply("nonexistent_agent_xyz");
+        assert!(reply.contains("nonexistent_agent_xyz"));
+        assert!(reply.contains("state unavailable"));
     }
 
     #[test]

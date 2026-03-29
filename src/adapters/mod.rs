@@ -17,7 +17,11 @@ pub trait Adapter: Send + 'static {
 }
 
 /// Build all configured adapters for an agent from workspace + user config.
-pub fn build_adapters(def: &AgentDef, user_cfg: Option<&UserConfig>) -> Vec<Box<dyn Adapter>> {
+pub fn build_adapters(
+    def: &AgentDef,
+    user_cfg: Option<&UserConfig>,
+    admin_telegram_ids: &[i64],
+) -> Vec<Box<dyn Adapter>> {
     let mut adapters: Vec<Box<dyn Adapter>> = Vec::new();
 
     if let Some(tg) = &def.telegram {
@@ -28,6 +32,8 @@ pub fn build_adapters(def: &AgentDef, user_cfg: Option<&UserConfig>) -> Vec<Box<
         adapters.push(Box::new(telegram::TelegramAdapter::new(
             tg.token.clone(),
             routes,
+            admin_telegram_ids.to_vec(),
+            def.name.clone(),
         )));
     }
 

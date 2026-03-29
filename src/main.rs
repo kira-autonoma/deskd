@@ -1229,7 +1229,9 @@ async fn serve(config_path: String) -> anyhow::Result<()> {
         info!(agent = %name, bus = %bus_socket, "started agent bus");
 
         // Start configured adapters (Telegram, Discord, etc.).
-        for adapter in adapters::build_adapters(def, user_cfg.as_ref()) {
+        for adapter in
+            adapters::build_adapters(def, user_cfg.as_ref(), &workspace.admin_telegram_ids)
+        {
             let bus = bus_socket.clone();
             let agent_name = name.clone();
             let adapter_name = adapter.name().to_string();
