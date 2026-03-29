@@ -1012,6 +1012,23 @@ impl AgentProcess {
                     response_text.push_str(&text);
                 }
                 Some(StdoutEvent::Result(mut result)) => {
+                    // Drain any trailing TextBlock events that arrived after the
+                    // result event but belong to this same turn. Without this,
+                    // the next call to send_task() would see stale blocks from
+                    // the previous turn, causing an off-by-one where turn N's
+                    // output appears as part of turn N+1's response. (#102)
+                    while let Ok(StdoutEvent::TextBlock(trailing)) = event_rx.try_recv() {
+                        debug!(
+                            agent = %self.name,
+                            len = trailing.len(),
+                            "drained trailing text block after result event"
+                        );
+                        if let Some(tx) = &progress_tx {
+                            let _ = tx.send(trailing.clone());
+                        }
+                        response_text.push_str(&trailing);
+                    }
+
                     result.response_text = response_text;
 
                     // Compute deltas: Claude's total_cost_usd and num_turns are
