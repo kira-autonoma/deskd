@@ -1010,6 +1010,61 @@ impl AgentProcess {
         image: Option<(&str, &str)>,
         limits: &TaskLimits,
     ) -> Result<TurnResult> {
+        // Drain any stale events left over from the previous turn before
+        // starting a new one. The post-result drain (below) catches most
+        // trailing TextBlock events, but there is a race window: if the
+        // stdout reader task has not yet queued events when try_recv()
+        // runs after the result, those events survive into the next turn.
+        // Draining here, before writing to stdin, ensures each turn
+        // starts with a clean channel. (#102)
+        {
+            let mut event_rx = self.event_rx.lock().await;
+            let mut drained = 0u32;
+            loop {
+                match event_rx.try_recv() {
+                    Ok(StdoutEvent::ProcessExited) => {
+                        bail!("persistent process exited between turns");
+                    }
+                    Ok(_) => {
+                        drained += 1;
+                    }
+                    Err(_) => break,
+                }
+            }
+            if drained > 0 {
+                info!(
+                    agent = %self.name,
+                    drained_events = drained,
+                    "flushed stale stdout events before new turn"
+                );
+            }
+            drop(event_rx);
+            // Yield to let the stdout reader task push any in-flight
+            // data before we proceed.
+            tokio::task::yield_now().await;
+            // Second drain pass after yielding — catches events that were
+            // being processed during the first pass.
+            let mut event_rx = self.event_rx.lock().await;
+            loop {
+                match event_rx.try_recv() {
+                    Ok(StdoutEvent::ProcessExited) => {
+                        bail!("persistent process exited between turns");
+                    }
+                    Ok(_) => {
+                        drained += 1;
+                    }
+                    Err(_) => break,
+                }
+            }
+            if drained > 0 {
+                info!(
+                    agent = %self.name,
+                    total_drained = drained,
+                    "pre-turn drain complete"
+                );
+            }
+        }
+
         // Build the user message.
         let user_msg = if let Some((b64_data, media_type)) = image {
             let msg = serde_json::json!({
