@@ -13,14 +13,75 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::HashSet;
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::config::UserConfig;
 use crate::statemachine;
 use crate::unified_inbox;
+
+// ─── Embedded bus for sub-agent orchestration ────────────────────────────────
+
+/// Container-local bus for managing sub-agents spawned via `add_persistent_agent`.
+/// Lazy-initialized on first use — zero overhead when sub-agents aren't needed.
+struct InternalBus {
+    /// Socket path for the internal bus.
+    socket_path: String,
+    /// Names of sub-agents registered on this bus.
+    sub_agents: HashSet<String>,
+    /// Handle to the bus server task (aborted on drop).
+    _bus_handle: tokio::task::JoinHandle<()>,
+    /// Worker handles for each sub-agent.
+    worker_handles: Vec<(String, tokio::task::JoinHandle<()>)>,
+}
+
+impl InternalBus {
+    /// Start a container-local bus on a temp socket.
+    async fn start(agent_name: &str) -> Result<Self> {
+        let socket_path = format!("/tmp/deskd-{}-internal.sock", agent_name);
+
+        // Remove stale socket if exists.
+        std::fs::remove_file(&socket_path).ok();
+
+        let bus_path = socket_path.clone();
+        let bus_handle = tokio::spawn(async move {
+            if let Err(e) = crate::bus::serve(&bus_path).await {
+                warn!(error = %e, "internal bus exited");
+            }
+        });
+
+        // Give the bus a moment to bind.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Verify the bus is reachable.
+        UnixStream::connect(&socket_path)
+            .await
+            .with_context(|| format!("internal bus failed to start at {}", socket_path))?;
+
+        info!(agent = %agent_name, socket = %socket_path, "internal bus started");
+
+        Ok(Self {
+            socket_path,
+            sub_agents: HashSet::new(),
+            _bus_handle: bus_handle,
+            worker_handles: Vec::new(),
+        })
+    }
+
+    /// Check if a target is a sub-agent on this bus.
+    fn is_sub_agent_target(&self, target: &str) -> bool {
+        if let Some(name) = target.strip_prefix("agent:") {
+            self.sub_agents.contains(name)
+        } else {
+            false
+        }
+    }
+}
 
 // ─── MCP Protocol types ───────────────────────────────────────────────────────
 
@@ -77,6 +138,9 @@ pub async fn run(agent_name: &str) -> Result<()> {
         .as_deref()
         .and_then(|p| UserConfig::load(p).ok());
 
+    // Lazy-initialized internal bus for sub-agent orchestration.
+    let internal_bus: Arc<Mutex<Option<InternalBus>>> = Arc::new(Mutex::new(None));
+
     info!(agent = %agent_name, bus = %bus_socket, "MCP server started");
 
     let stdin = tokio::io::stdin();
@@ -126,8 +190,26 @@ pub async fn run(agent_name: &str) -> Result<()> {
             continue;
         }
 
-        let resp = handle_request(&req, agent_name, &bus_socket, user_config.as_ref()).await;
+        let resp = handle_request(
+            &req,
+            agent_name,
+            &bus_socket,
+            user_config.as_ref(),
+            &internal_bus,
+        )
+        .await;
         write_response(&mut stdout, &resp).await?;
+    }
+
+    // Cleanup: stop all sub-agents on the internal bus.
+    if let Some(ibus) = internal_bus.lock().await.take() {
+        info!(agent = %agent_name, "stopping internal bus and sub-agents");
+        for (name, handle) in &ibus.worker_handles {
+            info!(agent = %name, "aborting sub-agent worker");
+            handle.abort();
+        }
+        ibus._bus_handle.abort();
+        std::fs::remove_file(&ibus.socket_path).ok();
     }
 
     info!(agent = %agent_name, "MCP server stopped (stdin closed)");
@@ -141,6 +223,7 @@ async fn handle_request(
     agent_name: &str,
     bus_socket: &str,
     user_config: Option<&UserConfig>,
+    internal_bus: &Arc<Mutex<Option<InternalBus>>>,
 ) -> Response {
     let id = req.id.clone();
     match req.method.as_str() {
@@ -148,7 +231,8 @@ async fn handle_request(
         "tools/list" => handle_tools_list(id, agent_name, user_config),
         "tools/call" => {
             let params = req.params.as_ref().unwrap_or(&Value::Null);
-            match handle_tools_call(params, agent_name, bus_socket, user_config).await {
+            match handle_tools_call(params, agent_name, bus_socket, user_config, internal_bus).await
+            {
                 Ok(resp) => Response::ok(id, resp),
                 Err(e) => Response::err(id, -32603, &format!("{:#}", e)),
             }
@@ -477,6 +561,7 @@ async fn handle_tools_call(
     agent_name: &str,
     bus_socket: &str,
     user_config: Option<&UserConfig>,
+    internal_bus: &Arc<Mutex<Option<InternalBus>>>,
 ) -> Result<Value> {
     let name = params
         .get("name")
@@ -486,8 +571,12 @@ async fn handle_tools_call(
     let args = params.get("arguments").unwrap_or(&Value::Null);
 
     match name {
-        "send_message" => call_send_message(args, agent_name, bus_socket, user_config).await,
-        "add_persistent_agent" => call_add_persistent_agent(args, agent_name, bus_socket).await,
+        "send_message" => {
+            call_send_message(args, agent_name, bus_socket, user_config, internal_bus).await
+        }
+        "add_persistent_agent" => {
+            call_add_persistent_agent(args, agent_name, bus_socket, internal_bus).await
+        }
         "create_reminder" => call_create_reminder(args).await,
         "list_inboxes" => call_list_inboxes().await,
         "read_inbox" => call_read_inbox(args).await,
@@ -496,7 +585,7 @@ async fn handle_tools_call(
         "task_create" => call_task_create(args, agent_name).await,
         "task_list" => call_task_list(args).await,
         "task_cancel" => call_task_cancel(args).await,
-        "remove_agent" => call_remove_agent(args, agent_name).await,
+        "remove_agent" => call_remove_agent(args, agent_name, internal_bus).await,
         "sm_create" => call_sm_create(args, agent_name, bus_socket, user_config).await,
         "sm_move" => call_sm_move(args, agent_name, bus_socket, user_config).await,
         "sm_query" => call_sm_query(args).await,
@@ -511,6 +600,7 @@ async fn call_send_message(
     agent_name: &str,
     bus_socket: &str,
     user_config: Option<&UserConfig>,
+    internal_bus: &Arc<Mutex<Option<InternalBus>>>,
 ) -> Result<Value> {
     let target = args
         .get("target")
@@ -533,10 +623,24 @@ async fn call_send_message(
         }
     }
 
+    // Route to internal bus if target is a sub-agent, otherwise use parent bus.
+    let effective_socket = {
+        let ibus = internal_bus.lock().await;
+        if let Some(ref ib) = *ibus {
+            if ib.is_sub_agent_target(target) {
+                ib.socket_path.clone()
+            } else {
+                bus_socket.to_string()
+            }
+        } else {
+            bus_socket.to_string()
+        }
+    };
+
     // Connect to bus, send message, disconnect.
-    let mut stream = UnixStream::connect(bus_socket)
+    let mut stream = UnixStream::connect(&effective_socket)
         .await
-        .with_context(|| format!("failed to connect to bus at {}", bus_socket))?;
+        .with_context(|| format!("failed to connect to bus at {}", effective_socket))?;
 
     // Register as the agent
     let reg = serde_json::json!({
@@ -560,7 +664,7 @@ async fn call_send_message(
     msg_line.push('\n');
     stream.write_all(msg_line.as_bytes()).await?;
 
-    info!(agent = %agent_name, target = %target, "send_message via MCP");
+    info!(agent = %agent_name, target = %target, bus = %effective_socket, "send_message via MCP");
 
     Ok(json!({
         "content": [{"type": "text", "text": format!("Message sent to {}", target)}],
@@ -571,7 +675,8 @@ async fn call_send_message(
 async fn call_add_persistent_agent(
     args: &Value,
     parent_name: &str,
-    bus_socket: &str,
+    _parent_bus_socket: &str,
+    internal_bus: &Arc<Mutex<Option<InternalBus>>>,
 ) -> Result<Value> {
     let name = args
         .get("name")
@@ -601,6 +706,19 @@ async fn call_add_persistent_agent(
 
     // Work dir: same as parent (best effort from env or cwd).
     let work_dir = std::env::var("PWD").unwrap_or_else(|_| "/tmp".to_string());
+
+    // Lazy-init internal bus on first sub-agent creation.
+    let bus_socket = {
+        let mut ibus_guard = internal_bus.lock().await;
+        if ibus_guard.is_none() {
+            let ibus = InternalBus::start(parent_name)
+                .await
+                .with_context(|| "failed to start internal bus for sub-agent orchestration")?;
+            *ibus_guard = Some(ibus);
+        }
+        let ibus = ibus_guard.as_ref().unwrap();
+        ibus.socket_path.clone()
+    };
 
     // Create agent state file via `deskd agent create`.
     let create_status = tokio::process::Command::new(&deskd_bin)
@@ -637,34 +755,53 @@ async fn call_add_persistent_agent(
         crate::agent::save_state_pub(&state).ok();
     }
 
-    // Start the worker as a background process connected to the parent's bus.
+    // Fail-fast: verify the internal bus is reachable before spawning.
+    UnixStream::connect(&bus_socket)
+        .await
+        .with_context(|| format!("internal bus at {} is not reachable", bus_socket))?;
+
+    // Start the worker as a background process connected to the internal bus.
     let mut run_args = vec![
         "agent".to_string(),
         "run".to_string(),
         name.to_string(),
         "--socket".to_string(),
-        bus_socket.to_string(),
+        bus_socket.clone(),
     ];
     for sub in &subscribe {
         run_args.push("--subscribe".to_string());
         run_args.push(sub.clone());
     }
-    let _child = tokio::process::Command::new(&deskd_bin)
+    let child = tokio::process::Command::new(&deskd_bin)
         .args(&run_args)
-        .env("DESKD_BUS_SOCKET", bus_socket)
+        .env("DESKD_BUS_SOCKET", &bus_socket)
         .env("DESKD_AGENT_NAME", name)
         .spawn()
         .with_context(|| format!("failed to spawn worker for agent '{}'", name))?;
 
-    // Detach — child runs independently.
-    info!(parent = %parent_name, agent = %name, bus = %bus_socket, "persistent sub-agent spawned");
+    // Track the sub-agent in the internal bus for routing and cleanup.
+    {
+        let mut ibus_guard = internal_bus.lock().await;
+        if let Some(ref mut ibus) = *ibus_guard {
+            ibus.sub_agents.insert(name.to_string());
+            let agent_name = name.to_string();
+            let handle = tokio::spawn(async move {
+                // Wait for the child process — just holds the handle for abort.
+                let mut child = child;
+                let _ = child.wait().await;
+            });
+            ibus.worker_handles.push((agent_name, handle));
+        }
+    }
+
+    info!(parent = %parent_name, agent = %name, bus = %bus_socket, "persistent sub-agent spawned on internal bus");
 
     let subscribe_display = subscribe.join(", ");
     Ok(json!({
         "content": [{
             "type": "text",
             "text": format!(
-                "Agent '{}' started on bus {}. Subscriptions: {}",
+                "Agent '{}' started on internal bus {}. Subscriptions: {}",
                 name, bus_socket, subscribe_display
             )
         }],
@@ -1002,7 +1139,11 @@ async fn call_task_cancel(args: &Value) -> Result<Value> {
     }))
 }
 
-async fn call_remove_agent(args: &Value, caller: &str) -> Result<Value> {
+async fn call_remove_agent(
+    args: &Value,
+    caller: &str,
+    internal_bus: &Arc<Mutex<Option<InternalBus>>>,
+) -> Result<Value> {
     let name = args
         .get("name")
         .and_then(|n| n.as_str())
@@ -1048,6 +1189,23 @@ async fn call_remove_agent(args: &Value, caller: &str) -> Result<Value> {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
+    // Clean up internal bus state.
+    {
+        let mut ibus_guard = internal_bus.lock().await;
+        if let Some(ref mut ibus) = *ibus_guard {
+            ibus.sub_agents.remove(name);
+            // Abort the worker handle.
+            ibus.worker_handles.retain(|(n, handle)| {
+                if n == name {
+                    handle.abort();
+                    false
+                } else {
+                    true
+                }
+            });
         }
     }
 
