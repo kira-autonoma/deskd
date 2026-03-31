@@ -1,92 +1,35 @@
-# archlint configuration for deskd
-# See: https://github.com/mshogin/archlint
-
-# Domain Model
-# =============
-# deskd is an agent orchestration runtime. Core domain concepts:
-#
-# Domain Layer (pure logic, no I/O):
-#   - Message: routable envelope with payload, source, target, reply_to
-#   - AgentConfig: agent identity, model, prompt, budget, command
-#   - AgentState: lifecycle state — session, cost, turns, status
-#   - SubAgentDef: sub-agent specification within parent scope
-#   - ScheduleDef: cron-based bus event definition
-#   - Routing: target resolution (direct, glob, broadcast, queue)
-#
-# Application Layer (orchestration):
-#   - Worker: message loop — receive task, execute, reply
-#   - Scheduler: fire cron events to bus
-#   - MCP Server: expose bus tools to Claude subprocess
-#   - Workflow: state machine execution engine
-#   - StateMachine: SM instance lifecycle and transitions
-#   - TaskLog: per-task structured log entries
-#   - Task: pull-based task queue (TaskStore, TaskCriteria)
-#   - UnifiedInbox: merged view across multiple inbox sources
-#   - ACP: Agent Communication Protocol (Claude JSON stream parsing)
-#   - Context: shared runtime context passed between layers
-#
-# Infrastructure Layer (I/O, external systems):
-#   - Bus: Unix socket pub/sub message transport
-#   - AgentProcess: Claude CLI subprocess management
-#   - Inbox: file-based async result storage
-#   - TelegramAdapter: Telegram Bot API bridge
-#   - DiscordAdapter: Discord bot bridge
-#   - Config loading: YAML parsing, env var expansion
-#
-# Desired architecture direction:
-#   - Infrastructure behind traits (Bus, Adapter, ProcessRunner)
-#   - Domain types have no I/O dependencies
-#   - Worker depends on abstractions, not concrete bus/process impl
-#   - Testable without real sockets, files, or subprocesses
-
-# Layer definitions for future enforcement
 rules:
-  layer_violations:
-    enabled: false  # enable when archlint supports Rust layers
-    params:
-      layers:
-        main: 0           # entry point / CLI
-        worker: 1          # application: orchestration
-        schedule: 1        # application: cron
-        mcp: 1             # application: MCP server
-        agent: 2           # domain + infrastructure (needs splitting)
-        bus: 3             # infrastructure: transport
-        adapters: 3        # infrastructure: external systems
-        inbox: 3           # infrastructure: persistence
-        config: 4          # infrastructure: config loading
-        message: 5         # domain: pure types
-
-  # Fan-out: ignore external crate dependencies, only count internal modules
-  max_fan_out:
+  fan_out:
+    threshold: 10
+    level: telemetry
+  fan_in:
+    threshold: 15
+    level: telemetry
+  cycles:
     enabled: true
-    threshold: 8  # worker is the orchestration hub (fan-out=7); 8 gives 1-unit headroom
-    exclude:
-      - main  # CLI entry point naturally has high fan-out
-
-  # Dependency direction: infrastructure should not import from application
-  forbidden_dependencies:
-    enabled: false  # enable when archlint supports Rust
-    params:
-      rules:
-        - from: "message"
-          to: ["agent", "worker", "bus", "mcp"]
-          reason: "domain types must not depend on application/infrastructure"
-        - from: "config"
-          to: ["agent", "worker", "bus", "mcp"]
-          reason: "config parsing must not depend on runtime modules"
-        - from: "bus"
-          to: ["worker", "agent", "mcp", "schedule"]
-          reason: "transport layer must not depend on application layer"
-
-  # DIP: infrastructure should be behind traits
-  dependency_inversion:
-    enabled: false  # enable when archlint supports Rust trait analysis
-    params:
-      # These modules should depend on traits, not concrete types:
-      check_modules: ["worker", "mcp", "schedule"]
-
-  coupling:
+    level: taboo
+  isp:
+    threshold: 5
+    level: personal
+  dip:
     enabled: true
-    params:
-      ca_threshold: 10  # config is a shared-types hub (Ca=9); 10 accommodates adapter growth
-      ce_threshold: 8   # efferent coupling (how many I depend on)
+    level: personal
+
+layers:
+  - name: domain
+    paths: ["src/domain"]
+  - name: ports
+    paths: ["src/ports"]
+  - name: infra
+    paths: ["src/infra", "src/adapters"]
+  - name: app
+    paths: ["src/worker", "src/schedule", "src/workflow", "src/mcp"]
+  - name: main
+    paths: ["src/main"]
+
+allowed_dependencies:
+  domain: []
+  ports: [domain]
+  infra: [domain, ports]
+  app: [domain, ports, infra]
+  main: [domain, ports, infra, app]
