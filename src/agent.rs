@@ -265,8 +265,8 @@ async fn send_inner(
         args.push(state.config.system_prompt.clone());
     }
 
-    // Always use stream-json input — needed for both multimodal content and mid-task injection.
-    args.push("--input-format=stream-json".to_string());
+    // Auto-inject required flags for stream-json operation (#151).
+    inject_required_flags(&mut args, &state.config.command);
 
     // Inject --model from agent config (sourced from deskd.yaml) unless the command
     // array already contains --model (e.g. hardcoded in workspace.yaml).
@@ -462,6 +462,35 @@ async fn send_inner(
 }
 
 /// Build the tokio Command for running the agent process.
+/// Inject flags required for persistent stream-json operation.
+///
+/// Checks the agent's command array to avoid duplicating flags that were
+/// explicitly set in workspace.yaml. Sub-agents created via MCP typically
+/// have `command: ["claude"]` with no flags, so all are injected.
+fn inject_required_flags(args: &mut Vec<String>, command: &[String]) {
+    // --input-format=stream-json — needed for multimodal content and mid-task injection.
+    args.push("--input-format=stream-json".to_string());
+
+    // --output-format stream-json — worker expects JSON stdout, not plain text.
+    if !command.iter().any(|a| a.contains("output-format")) {
+        args.push("--output-format".to_string());
+        args.push("stream-json".to_string());
+    }
+
+    // --verbose — required when using --output-format stream-json.
+    if !command.iter().any(|a| a == "--verbose") {
+        args.push("--verbose".to_string());
+    }
+
+    // --dangerously-skip-permissions — without this, Claude blocks on permission prompts.
+    if !command
+        .iter()
+        .any(|a| a.contains("dangerously-skip-permissions"))
+    {
+        args.push("--dangerously-skip-permissions".to_string());
+    }
+}
+
 /// Uses cfg.command as the executable (defaults to ["claude"]).
 /// When unix_user is set, wraps with sudo and strips SSH env vars.
 /// extra_env: additional environment variables to pass to the process.
@@ -935,7 +964,8 @@ impl AgentProcess {
             args.push(state.config.system_prompt.clone());
         }
 
-        args.push("--input-format=stream-json".to_string());
+        // Auto-inject required flags for stream-json operation (#151).
+        inject_required_flags(&mut args, &state.config.command);
 
         if !state.config.model.is_empty()
             && !state
