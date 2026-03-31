@@ -4,6 +4,46 @@
 
 use serde::{Deserialize, Serialize};
 
+/// A state machine model definition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelDef {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub states: Vec<String>,
+    pub initial: String,
+    #[serde(default)]
+    pub terminal: Vec<String>,
+    pub transitions: Vec<TransitionDef>,
+}
+
+/// A transition between states in a model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitionDef {
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub trigger: Option<String>,
+    #[serde(default)]
+    pub on: Option<String>,
+    #[serde(default)]
+    pub assignee: Option<String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(rename = "type", default)]
+    pub step_type: Option<String>,
+    #[serde(default)]
+    pub notify: Option<String>,
+    #[serde(default)]
+    pub timeout: Option<String>,
+    #[serde(default)]
+    pub timeout_goto: Option<String>,
+    /// Task queue criteria for this transition (model, labels).
+    /// When set, dispatch creates a task in the queue instead of direct bus message.
+    #[serde(default)]
+    pub criteria: Option<crate::domain::task::TaskCriteria>,
+}
+
 /// An instance of a state machine model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Instance {

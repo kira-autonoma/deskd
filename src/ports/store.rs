@@ -5,8 +5,7 @@
 
 use anyhow::Result;
 
-use crate::config::ModelDef;
-use crate::domain::statemachine::Instance;
+use crate::domain::statemachine::{Instance, ModelDef};
 use crate::domain::task::{QueueSummary, Task, TaskCriteria, TaskStatus};
 
 /// Persistence operations for the task queue.

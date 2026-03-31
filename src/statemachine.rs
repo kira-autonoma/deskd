@@ -3,8 +3,6 @@ use chrono::Utc;
 use std::path::PathBuf;
 use tracing::info;
 
-use crate::config::{ModelDef, TransitionDef};
-
 // Re-export domain types for backward compatibility.
 pub use crate::domain::statemachine::*;
 
