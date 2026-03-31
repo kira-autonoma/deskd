@@ -1,6 +1,7 @@
 //! deskd library — exposes modules for integration testing.
 
 pub mod domain;
+pub mod infra;
 pub mod ports;
 
 pub mod agent;

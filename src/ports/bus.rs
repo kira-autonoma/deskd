@@ -5,25 +5,29 @@
 //! network transports.
 
 use anyhow::Result;
+use std::future::Future;
+use std::pin::Pin;
 
 use crate::domain::message::Message;
 
-/// Abstraction over message transport.
+/// Abstraction over message transport (object-safe).
 ///
 /// Workers and adapters interact with the bus through this trait.
-/// The Unix socket implementation lives in `bus.rs`; tests can use
-/// an in-memory implementation.
+/// Implementations: `UnixBus` (production), `InMemoryBus` (testing).
 pub trait MessageBus: Send + Sync {
     /// Send a message to the bus for routing.
-    fn send(&self, msg: &Message) -> impl std::future::Future<Output = Result<()>> + Send;
+    fn send<'a>(
+        &'a self,
+        msg: &'a Message,
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
     /// Receive the next message addressed to this client.
-    fn recv(&self) -> impl std::future::Future<Output = Result<Message>> + Send;
+    fn recv(&self) -> Pin<Box<dyn Future<Output = Result<Message>> + Send + '_>>;
 
     /// Register this client on the bus with the given subscriptions.
     fn register(
         &self,
         name: &str,
         subscriptions: &[String],
-    ) -> impl std::future::Future<Output = Result<()>> + Send;
+    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>;
 }

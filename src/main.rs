@@ -7,6 +7,8 @@ pub mod context;
 mod domain;
 pub mod graph;
 mod inbox;
+#[allow(dead_code)]
+mod infra;
 mod mcp;
 mod message;
 #[allow(dead_code)]
