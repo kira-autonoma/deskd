@@ -513,7 +513,10 @@ async fn test_sm_move_notifies_workflow_engine() {
 
     // Workflow engine should receive the notification.
     let received = read_one(&mut engine_rx, 2000).await;
-    assert!(received.is_some(), "engine should receive move notification");
+    assert!(
+        received.is_some(),
+        "engine should receive move notification"
+    );
     let received = received.unwrap();
     assert_eq!(received["target"], format!("sm:{}", inst.id));
     assert_eq!(received["payload"]["action"], "moved");
