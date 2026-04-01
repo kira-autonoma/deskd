@@ -1385,41 +1385,12 @@ async fn call_sm_move(
     store.move_to(&mut inst, &model, state, agent_name, note)?;
     info!(agent = %agent_name, instance = %id, from = %from, to = %state, "sm_move via MCP");
 
-    // If the new state has an assignee, dispatch via bus.
-    if !inst.assignee.is_empty() && !statemachine::is_terminal(&model, &inst) {
-        let task_text = format!(
-            "---\n## Task: {}\n\n{}\n\n---\n## Metadata\ninstance_id: {}\nmodel: {}\nstate: {}",
-            inst.title, inst.body, inst.id, inst.model, inst.state
-        );
-
-        let mut stream = UnixStream::connect(bus_socket)
-            .await
-            .with_context(|| format!("failed to connect to bus at {}", bus_socket))?;
-
-        let reg = serde_json::json!({
-            "type": "register",
-            "name": format!("{}-mcp-sm", agent_name),
-            "subscriptions": []
-        });
-        let mut line = serde_json::to_string(&reg)?;
-        line.push('\n');
-        stream.write_all(line.as_bytes()).await?;
-
-        let msg = serde_json::json!({
-            "type": "message",
-            "id": Uuid::new_v4().to_string(),
-            "source": "workflow-engine",
-            "target": &inst.assignee,
-            "payload": {
-                "task": task_text,
-                "sm_instance_id": inst.id,
-            },
-            "reply_to": format!("sm:{}", inst.id),
-            "metadata": {"priority": 5u8},
-        });
-        let mut msg_line = serde_json::to_string(&msg)?;
-        msg_line.push('\n');
-        stream.write_all(msg_line.as_bytes()).await?;
+    // Notify workflow engine to dispatch if the new state has an assignee.
+    if !inst.assignee.is_empty()
+        && !statemachine::is_terminal(&model, &inst)
+        && let Err(e) = crate::app::workflow::notify_moved(bus_socket, id, agent_name).await
+    {
+        warn!(agent = %agent_name, instance = %id, error = %e, "failed to notify workflow engine after sm_move");
     }
 
     Ok(json!({

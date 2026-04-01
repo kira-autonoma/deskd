@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
             action,
         } => {
             let user_cfg = config::UserConfig::load(&config_path)?;
-            commands::sm::handle(action, &user_cfg)?;
+            commands::sm::handle(action, &user_cfg, &config_path).await?;
         }
         Commands::Task { action } => {
             commands::task::handle(action)?;

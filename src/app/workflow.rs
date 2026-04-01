@@ -10,6 +10,37 @@ use crate::domain::statemachine::ModelDef;
 
 type Writer = std::sync::Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>;
 
+/// Notify the workflow engine that an SM instance was moved.
+///
+/// Connects to the bus, sends an `action: "moved"` message to `sm:<id>`,
+/// and disconnects. The workflow engine picks this up and dispatches if needed.
+pub async fn notify_moved(bus_socket: &str, instance_id: &str, source: &str) -> Result<()> {
+    let mut stream = UnixStream::connect(bus_socket).await?;
+
+    let reg = serde_json::json!({
+        "type": "register",
+        "name": format!("{}-sm-notify", source),
+        "subscriptions": []
+    });
+    let mut line = serde_json::to_string(&reg)?;
+    line.push('\n');
+    stream.write_all(line.as_bytes()).await?;
+
+    let msg = serde_json::json!({
+        "type": "message",
+        "id": Uuid::new_v4().to_string(),
+        "source": source,
+        "target": format!("sm:{}", instance_id),
+        "payload": {"action": "moved"},
+        "metadata": {"priority": 5u8},
+    });
+    let mut msg_line = serde_json::to_string(&msg)?;
+    msg_line.push('\n');
+    stream.write_all(msg_line.as_bytes()).await?;
+
+    Ok(())
+}
+
 /// Run the workflow engine on the given bus.
 /// Registers as `workflow-engine`, subscribes to `sm:*`.
 /// On startup, dispatches pending instances. Then listens for completion messages.
@@ -45,6 +76,15 @@ pub async fn run(socket_path: &str, models: Vec<ModelDef>) -> Result<()> {
             Some(id) => id.to_string(),
             None => continue,
         };
+
+        // Check if this is a move notification (from CLI/MCP sm_move).
+        if msg.payload.get("action").and_then(|a| a.as_str()) == Some("moved") {
+            info!(instance = %instance_id, "received move notification");
+            if let Err(e) = handle_move_notification(&writer, &models, &store, &instance_id).await {
+                warn!(instance = %instance_id, error = %e, "failed to handle move notification");
+            }
+            continue;
+        }
 
         // Extract result from payload.
         let result = msg
@@ -122,6 +162,32 @@ async fn handle_completion(
         }
     } else {
         info!(instance = %instance_id, state = %inst.state, "no matching transition, awaiting manual move");
+    }
+
+    Ok(())
+}
+
+/// Handle a move notification: reload instance and dispatch if it has an assignee.
+async fn handle_move_notification(
+    writer: &Writer,
+    models: &[ModelDef],
+    store: &statemachine::StateMachineStore,
+    instance_id: &str,
+) -> Result<()> {
+    let inst = store.load(instance_id)?;
+    let model = models
+        .iter()
+        .find(|m| m.name == inst.model)
+        .ok_or_else(|| anyhow::anyhow!("model '{}' not found", inst.model))?;
+
+    if statemachine::is_terminal(model, &inst) {
+        info!(instance = %instance_id, state = %inst.state, "moved to terminal state, no dispatch");
+        return Ok(());
+    }
+
+    if !inst.assignee.is_empty() {
+        dispatch_instance(writer, model, &inst).await?;
+        info!(instance = %instance_id, assignee = %inst.assignee, "dispatched after move");
     }
 
     Ok(())

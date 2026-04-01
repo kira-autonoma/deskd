@@ -415,9 +415,6 @@ async fn test_workflow_engine_retries_bus_connection() {
     let sock_for_engine = socket.clone();
     let models: Vec<deskd::config::ModelDef> = vec![model.clone()];
     let engine_handle = tokio::spawn(async move {
-        // Override HOME so StateMachineStore::default_for_home() won't find our temp store.
-        // Instead, we rely on the workflow::run function using default_for_home internally,
-        // so we need to test via bus_connect directly.
         deskd::app::worker::bus_connect(
             &sock_for_engine,
             "workflow-engine",
@@ -470,6 +467,56 @@ async fn test_workflow_engine_retries_bus_connection() {
         received.is_some(),
         "reviewer should receive message sent through retried connection"
     );
+
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// sm_move → workflow engine receives "moved" notification → dispatches to assignee.
+#[tokio::test]
+async fn test_sm_move_notifies_workflow_engine() {
+    let socket = temp_socket();
+    let tmp = temp_dir();
+
+    // Create SM instance and move to review (has assignee: agent:reviewer).
+    let store = deskd::app::statemachine::StateMachineStore::new(tmp.clone());
+    let model = test_model();
+    let mut inst = store
+        .create(&model, "Move test", "Testing move dispatch", "cli")
+        .unwrap();
+    store
+        .move_to(&mut inst, &model, "review", "manual", None)
+        .unwrap();
+    assert_eq!(inst.state, "review");
+    assert_eq!(inst.assignee, "agent:reviewer");
+
+    // Start bus.
+    let sock = socket.clone();
+    tokio::spawn(async move {
+        deskd::app::bus::serve(&sock).await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Connect workflow engine (subscribes to sm:*).
+    let (mut engine_rx, mut engine_tx) =
+        connect_and_register(&socket, "workflow-engine", &["sm:*"]).await;
+
+    // Connect reviewer to receive dispatched tasks.
+    let (mut reviewer_rx, _reviewer_tx) =
+        connect_and_register(&socket, "reviewer", &["agent:reviewer"]).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Simulate what sm_move does: send "moved" notification via bus.
+    deskd::app::workflow::notify_moved(&socket, &inst.id, "cli")
+        .await
+        .unwrap();
+
+    // Workflow engine should receive the notification.
+    let received = read_one(&mut engine_rx, 2000).await;
+    assert!(received.is_some(), "engine should receive move notification");
+    let received = received.unwrap();
+    assert_eq!(received["target"], format!("sm:{}", inst.id));
+    assert_eq!(received["payload"]["action"], "moved");
 
     let _ = std::fs::remove_file(&socket);
     let _ = std::fs::remove_dir_all(&tmp);

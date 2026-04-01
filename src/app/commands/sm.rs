@@ -1,14 +1,19 @@
 //! `deskd sm` subcommand handlers.
 
 use anyhow::Result;
+use tracing::warn;
 
 use crate::app::cli::SmAction;
-use crate::app::statemachine;
+use crate::app::{statemachine, workflow};
 use crate::config;
 
 use super::truncate;
 
-pub fn handle(action: SmAction, user_cfg: &config::UserConfig) -> Result<()> {
+pub async fn handle(
+    action: SmAction,
+    user_cfg: &config::UserConfig,
+    config_path: &str,
+) -> Result<()> {
     let store = statemachine::StateMachineStore::default_for_home();
     let models: Vec<statemachine::ModelDef> =
         user_cfg.models.iter().cloned().map(Into::into).collect();
@@ -86,6 +91,21 @@ pub fn handle(action: SmAction, user_cfg: &config::UserConfig) -> Result<()> {
                 std::env::var("DESKD_AGENT_NAME").unwrap_or_else(|_| "manual".to_string());
             store.move_to(&mut inst, m, &state, &trigger, note.as_deref())?;
             println!("{} -> {} ({})", id, inst.state, inst.model);
+
+            // Notify workflow engine if the new state has an assignee.
+            if !inst.assignee.is_empty() && !statemachine::is_terminal(m, &inst) {
+                let bus_socket = std::env::var("DESKD_BUS_SOCKET").unwrap_or_else(|_| {
+                    let work_dir = std::path::Path::new(config_path)
+                        .parent()
+                        .unwrap_or(std::path::Path::new("."));
+                    config::agent_bus_socket(&work_dir.to_string_lossy())
+                });
+                if std::path::Path::new(&bus_socket).exists()
+                    && let Err(e) = workflow::notify_moved(&bus_socket, &id, "cli").await
+                {
+                    warn!(instance = %id, error = %e, "failed to notify workflow engine");
+                }
+            }
         }
         SmAction::Status { id } => {
             let inst = store.load(&id)?;
