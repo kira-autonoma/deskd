@@ -68,8 +68,8 @@ fn make_config(name: &str) -> deskd::app::agent::AgentConfig {
         command: vec!["echo".into()],
         config_path: None,
         container: None,
-        session: deskd::config::SessionMode::Ephemeral,
-        runtime: deskd::config::AgentRuntime::Claude,
+        session: deskd::infra::dto::ConfigSessionMode::Ephemeral,
+        runtime: deskd::infra::dto::ConfigAgentRuntime::Claude,
     }
 }
 

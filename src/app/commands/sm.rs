@@ -10,13 +10,15 @@ use super::truncate;
 
 pub fn handle(action: SmAction, user_cfg: &config::UserConfig) -> Result<()> {
     let store = statemachine::StateMachineStore::default_for_home();
+    let models: Vec<statemachine::ModelDef> =
+        user_cfg.models.iter().cloned().map(Into::into).collect();
     match action {
         SmAction::Models => {
-            if user_cfg.models.is_empty() {
+            if models.is_empty() {
                 println!("No models defined");
             } else {
                 println!("{:<20} {:<8} {:<8} DESCRIPTION", "NAME", "STATES", "TRANS");
-                for m in &user_cfg.models {
+                for m in &models {
                     println!(
                         "{:<20} {:<8} {:<8} {}",
                         m.name,
@@ -28,8 +30,7 @@ pub fn handle(action: SmAction, user_cfg: &config::UserConfig) -> Result<()> {
             }
         }
         SmAction::Show { model } => {
-            let m = user_cfg
-                .models
+            let m = models
                 .iter()
                 .find(|m| m.name == model)
                 .ok_or_else(|| anyhow::anyhow!("Model '{}' not found", model))?;
@@ -64,8 +65,7 @@ pub fn handle(action: SmAction, user_cfg: &config::UserConfig) -> Result<()> {
             }
         }
         SmAction::Create { model, title, body } => {
-            let m = user_cfg
-                .models
+            let m = models
                 .iter()
                 .find(|m| m.name == model)
                 .ok_or_else(|| anyhow::anyhow!("Model '{}' not found", model))?;
@@ -78,8 +78,7 @@ pub fn handle(action: SmAction, user_cfg: &config::UserConfig) -> Result<()> {
         }
         SmAction::Move { id, state, note } => {
             let mut inst = store.load(&id)?;
-            let m = user_cfg
-                .models
+            let m = models
                 .iter()
                 .find(|m| m.name == inst.model)
                 .ok_or_else(|| anyhow::anyhow!("Model '{}' not found in config", inst.model))?;
@@ -151,8 +150,7 @@ pub fn handle(action: SmAction, user_cfg: &config::UserConfig) -> Result<()> {
         }
         SmAction::Cancel { id } => {
             let mut inst = store.load(&id)?;
-            let m = user_cfg
-                .models
+            let m = models
                 .iter()
                 .find(|m| m.name == inst.model)
                 .ok_or_else(|| anyhow::anyhow!("Model '{}' not found in config", inst.model))?;

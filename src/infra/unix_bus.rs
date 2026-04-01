@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use crate::domain::message::Message;
+use crate::infra::dto::{BusEnvelope, BusMessage};
 use crate::ports::bus::MessageBus;
 
 /// Production bus client backed by a Unix socket connection.
@@ -98,18 +98,11 @@ impl UnixBus {
 impl MessageBus for UnixBus {
     fn send<'a>(
         &'a self,
-        msg: &'a Message,
+        msg: &'a crate::domain::message::Message,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            let envelope = serde_json::json!({
-                "type": "message",
-                "id": &msg.id,
-                "source": &msg.source,
-                "target": &msg.target,
-                "payload": &msg.payload,
-                "reply_to": &msg.reply_to,
-                "metadata": &msg.metadata,
-            });
+            let dto: BusMessage = msg.into();
+            let envelope = BusEnvelope::Message(dto);
             let mut line = serde_json::to_string(&envelope)?;
             line.push('\n');
             let mut writer = self.writer.lock().await;
@@ -118,7 +111,9 @@ impl MessageBus for UnixBus {
         })
     }
 
-    fn recv(&self) -> Pin<Box<dyn Future<Output = Result<Message>> + Send + '_>> {
+    fn recv(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<crate::domain::message::Message>> + Send + '_>> {
         Box::pin(async move {
             let mut reader = self.reader.lock().await;
             loop {
@@ -131,8 +126,8 @@ impl MessageBus for UnixBus {
                 if trimmed.is_empty() {
                     continue;
                 }
-                match serde_json::from_str::<Message>(trimmed) {
-                    Ok(msg) => return Ok(msg),
+                match serde_json::from_str::<BusMessage>(trimmed) {
+                    Ok(dto) => return Ok(dto.into()),
                     Err(e) => {
                         warn!(error = %e, "invalid message from bus, skipping");
                         continue;

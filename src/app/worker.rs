@@ -10,7 +10,8 @@ use crate::app::agent::{self, TokenUsage};
 use crate::app::message::Message;
 use crate::app::tasklog;
 use crate::app::unified_inbox;
-use crate::domain::agent::{AgentRuntime, SessionMode};
+use crate::domain::agent::AgentRuntime;
+use crate::infra::dto::ConfigSessionMode;
 
 /// Wrapper for either a Claude or ACP agent process.
 enum RuntimeProcess {
@@ -221,7 +222,7 @@ pub async fn run(
 
     // Start persistent agent process (reused across tasks).
     let effective_bus = bus_socket.as_deref().unwrap_or(socket_path).to_string();
-    let agent_runtime = initial_state.config.runtime.clone();
+    let agent_runtime: AgentRuntime = initial_state.config.runtime.clone().into();
     let mut process = RuntimeProcess::start(name, &effective_bus, &agent_runtime).await?;
 
     // Build task limits from agent config — enforced in real-time during tasks.
@@ -288,8 +289,8 @@ pub async fn run(
             continue;
         }
 
-        let msg: Message = match serde_json::from_str(&line) {
-            Ok(m) => m,
+        let msg: Message = match serde_json::from_str::<crate::infra::dto::BusMessage>(&line) {
+            Ok(dto) => dto.into(),
             Err(e) => {
                 warn!(agent = %name, error = %e, "invalid message from bus");
                 continue;
@@ -362,7 +363,7 @@ pub async fn run(
 
         // Fresh session if requested or agent is ephemeral.
         let needs_fresh =
-            msg.metadata.fresh || initial_state.config.session == SessionMode::Ephemeral;
+            msg.metadata.fresh || initial_state.config.session == ConfigSessionMode::Ephemeral;
         if needs_fresh {
             info!(agent = %name, fresh = msg.metadata.fresh, "fresh session requested, restarting process");
             process.stop().await;
@@ -452,7 +453,8 @@ pub async fn run(
                     if bus_line.is_empty() {
                         continue;
                     }
-                    if let Ok(inject_msg) = serde_json::from_str::<Message>(&bus_line) {
+                    if let Ok(dto) = serde_json::from_str::<crate::infra::dto::BusMessage>(&bus_line) {
+                        let inject_msg: Message = dto.into();
                         let inject_task = inject_msg
                             .payload
                             .get("task")

@@ -7,7 +7,8 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, info, warn};
 
-use crate::app::message::{Envelope, Message};
+use crate::app::message::Message;
+use crate::infra::dto::{BusEnvelope, BusMessage};
 
 type Tx = mpsc::UnboundedSender<Message>;
 
@@ -121,12 +122,15 @@ async fn handle_connection(stream: UnixStream, state: Arc<RwLock<BusState>>) -> 
         .await?
         .context("connection closed before register")?;
 
-    let envelope: Envelope =
+    let envelope: BusEnvelope =
         serde_json::from_str(&first_line).context("invalid register message")?;
 
-    let (name, subscriptions) = match envelope {
-        Envelope::Register(reg) => (reg.name, reg.subscriptions.into_iter().collect()),
-        Envelope::Message(_) | Envelope::List => {
+    let domain_envelope: crate::domain::message::Envelope = envelope.into();
+    let (name, subscriptions) = match domain_envelope {
+        crate::domain::message::Envelope::Register(reg) => {
+            (reg.name, reg.subscriptions.into_iter().collect())
+        }
+        crate::domain::message::Envelope::Message(_) | crate::domain::message::Envelope::List => {
             anyhow::bail!("first message must be register");
         }
     };
@@ -152,7 +156,8 @@ async fn handle_connection(stream: UnixStream, state: Arc<RwLock<BusState>>) -> 
     // rather than waiting for the next write to push it out of kernel buffers.
     let writer_handle = tokio::spawn(async move {
         while let Some(msg) = rx.recv().await {
-            let mut line = serde_json::to_string(&msg).unwrap_or_default();
+            let dto: BusMessage = (&msg).into();
+            let mut line = serde_json::to_string(&dto).unwrap_or_default();
             line.push('\n');
             if writer.write_all(line.as_bytes()).await.is_err() {
                 break;
@@ -169,7 +174,7 @@ async fn handle_connection(stream: UnixStream, state: Arc<RwLock<BusState>>) -> 
             continue;
         }
 
-        let envelope: Envelope = match serde_json::from_str(&line) {
+        let bus_envelope: BusEnvelope = match serde_json::from_str(&line) {
             Ok(e) => e,
             Err(e) => {
                 warn!(client = %name, error = %e, "invalid message");
@@ -177,16 +182,17 @@ async fn handle_connection(stream: UnixStream, state: Arc<RwLock<BusState>>) -> 
             }
         };
 
+        let envelope: crate::domain::message::Envelope = bus_envelope.into();
         match envelope {
-            Envelope::Message(msg) => {
+            crate::domain::message::Envelope::Message(msg) => {
                 debug!(from = %msg.source, to = %msg.target, "routing message");
                 let bus = state.read().await;
                 bus.route(&msg);
             }
-            Envelope::Register(_) => {
+            crate::domain::message::Envelope::Register(_) => {
                 warn!(client = %name, "ignoring duplicate register");
             }
-            Envelope::List => {
+            crate::domain::message::Envelope::List => {
                 let bus = state.read().await;
                 let clients = bus.list_clients();
                 if let Some(client) = bus.clients.get(&name) {

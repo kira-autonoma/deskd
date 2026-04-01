@@ -10,6 +10,8 @@ use tokio::sync::mpsc;
 
 use crate::domain::message::Message;
 use crate::ports::bus::MessageBus;
+// Note: InMemoryBus uses domain::Message directly since it's in-memory
+// (no serialization boundary). DTOs are for wire/storage formats only.
 
 /// Test-only bus backed by in-memory channels.
 pub struct InMemoryBus {

@@ -42,8 +42,8 @@ pub async fn run(socket_path: &str, models: Vec<ModelDef>) -> Result<()> {
             continue;
         }
 
-        let msg: Message = match serde_json::from_str(&line) {
-            Ok(m) => m,
+        let msg: Message = match serde_json::from_str::<crate::infra::dto::BusMessage>(&line) {
+            Ok(dto) => dto.into(),
             Err(_) => continue,
         };
 

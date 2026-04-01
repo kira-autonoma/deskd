@@ -1,11 +1,9 @@
 //! Task queue domain types.
 //!
 //! Pure data types — no I/O, no persistence logic.
+//! Serde lives on infra DTOs (infra::dto), not here.
 
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStatus {
     Pending,
     Active,
@@ -27,40 +25,32 @@ impl std::fmt::Display for TaskStatus {
 }
 
 /// Criteria for matching tasks to workers.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct TaskCriteria {
     /// Required model (e.g. "claude-sonnet-4-6").
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     /// Required labels.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
 }
 
 /// A task in the queue.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Task {
     pub id: String,
     pub description: String,
     pub status: TaskStatus,
-    #[serde(default)]
     pub criteria: TaskCriteria,
     /// Agent assigned to the task (set when status -> active).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
     /// Result text (set when status -> done).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<String>,
     /// Error message (set when status -> failed).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     /// Who created the task.
-    #[serde(default)]
     pub created_by: String,
     /// Linked state machine instance ID (set when task is created by SM dispatch).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sm_instance_id: Option<String>,
 }
 

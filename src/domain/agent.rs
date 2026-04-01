@@ -1,10 +1,8 @@
 //! Agent domain types — pure enums and structs, no I/O.
-
-use serde::{Deserialize, Serialize};
+//! Serde lives on config DTOs (infra::dto), not here.
 
 /// Session mode for an agent: persistent (default) or ephemeral.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SessionMode {
     /// Continue existing session across tasks (uses --resume).
     #[default]
@@ -14,8 +12,7 @@ pub enum SessionMode {
 }
 
 /// Agent runtime protocol: claude (default) or acp.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum AgentRuntime {
     /// Claude stream-json protocol (default).
     #[default]

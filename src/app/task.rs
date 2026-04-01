@@ -10,6 +10,8 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use std::path::PathBuf;
 
+use crate::infra::dto::StoredTask;
+
 // Re-export domain types for backward compatibility.
 pub use crate::domain::task::*;
 
@@ -37,7 +39,8 @@ impl TaskStore {
     fn save(&self, task: &Task) -> Result<()> {
         let path = self.task_path(&task.id);
         let tmp = path.with_extension("tmp");
-        let content = serde_json::to_string_pretty(task)?;
+        let dto: StoredTask = task.into();
+        let content = serde_json::to_string_pretty(&dto)?;
         std::fs::write(&tmp, &content)?;
         std::fs::rename(&tmp, &path)?;
         Ok(())
@@ -47,8 +50,8 @@ impl TaskStore {
         let path = self.task_path(id);
         let content =
             std::fs::read_to_string(&path).with_context(|| format!("Task '{}' not found", id))?;
-        let task: Task = serde_json::from_str(&content)?;
-        Ok(task)
+        let dto: StoredTask = serde_json::from_str(&content)?;
+        Ok(dto.into())
     }
 
     /// Create a new task in the queue.
@@ -115,8 +118,9 @@ impl TaskStore {
                 let path = entry.path();
                 if path.extension().map(|e| e == "json").unwrap_or(false)
                     && let Ok(content) = std::fs::read_to_string(&path)
-                    && let Ok(task) = serde_json::from_str::<Task>(&content)
+                    && let Ok(dto) = serde_json::from_str::<StoredTask>(&content)
                 {
+                    let task: Task = dto.into();
                     if let Some(filter) = status_filter {
                         if task.status == filter {
                             tasks.push(task);
@@ -166,10 +170,12 @@ impl TaskStore {
             let path = entry.path();
             if path.extension().map(|e| e == "json").unwrap_or(false)
                 && let Ok(content) = std::fs::read_to_string(&path)
-                && let Ok(task) = serde_json::from_str::<Task>(&content)
-                && task.status == TaskStatus::Pending
+                && let Ok(dto) = serde_json::from_str::<StoredTask>(&content)
             {
-                pending.push(task);
+                let task: Task = dto.into();
+                if task.status == TaskStatus::Pending {
+                    pending.push(task);
+                }
             }
         }
         pending.sort_by(|a, b| a.created_at.cmp(&b.created_at));
@@ -188,7 +194,8 @@ impl TaskStore {
     fn try_claim(&self, task_id: &str, agent_name: &str) -> Result<Task> {
         let path = self.task_path(task_id);
         let content = std::fs::read_to_string(&path)?;
-        let mut task: Task = serde_json::from_str(&content)?;
+        let dto: StoredTask = serde_json::from_str(&content)?;
+        let mut task: Task = dto.into();
 
         if task.status != TaskStatus::Pending {
             bail!("Task '{}' is no longer pending", task_id);

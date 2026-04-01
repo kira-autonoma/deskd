@@ -3,6 +3,8 @@
 //! Pure domain types live in `domain::context`. This module adds
 //! persistence (load/save) and materialization (execute live nodes).
 
+use crate::infra::dto::StoredMainBranch;
+
 // Re-export all domain types for backward compatibility.
 pub use crate::domain::context::*;
 
@@ -10,7 +12,8 @@ impl MainBranch {
     /// Load from YAML file
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        Ok(serde_yaml::from_str(&content)?)
+        let dto: StoredMainBranch = serde_yaml::from_str(&content)?;
+        Ok(dto.into())
     }
 
     /// Save to YAML file
@@ -18,7 +21,8 @@ impl MainBranch {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let content = serde_yaml::to_string(self)?;
+        let dto: StoredMainBranch = self.into();
+        let content = serde_yaml::to_string(&dto)?;
         std::fs::write(path, content)?;
         Ok(())
     }
@@ -364,13 +368,15 @@ mod tests {
 
     #[test]
     fn test_context_config_serde() {
+        use crate::infra::dto::ConfigContextConfig;
         let yaml = r#"
 enabled: true
 main_budget_tokens: 12000
 compact_threshold_tokens: 90000
 main_path: /home/kira/.deskd/context/main.yaml
 "#;
-        let cfg: ContextConfig = serde_yaml::from_str(yaml).unwrap();
+        let dto: ConfigContextConfig = serde_yaml::from_str(yaml).unwrap();
+        let cfg: ContextConfig = dto.into();
         assert!(cfg.enabled);
         assert_eq!(cfg.main_budget_tokens, Some(12000));
         assert_eq!(cfg.compact_threshold_tokens, Some(90000));

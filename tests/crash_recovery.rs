@@ -82,8 +82,8 @@ fn test_agent_config(name: &str) -> deskd::app::agent::AgentConfig {
         command: vec!["echo".into()],
         config_path: None,
         container: None,
-        session: deskd::config::SessionMode::Persistent,
-        runtime: deskd::config::AgentRuntime::Claude,
+        session: deskd::infra::dto::ConfigSessionMode::Persistent,
+        runtime: deskd::infra::dto::ConfigAgentRuntime::Claude,
     }
 }
 

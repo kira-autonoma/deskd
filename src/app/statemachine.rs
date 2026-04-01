@@ -3,6 +3,8 @@ use chrono::Utc;
 use std::path::PathBuf;
 use tracing::info;
 
+use crate::infra::dto::StoredInstance;
+
 // Re-export domain types for backward compatibility.
 pub use crate::domain::statemachine::*;
 
@@ -31,7 +33,8 @@ impl StateMachineStore {
     pub fn save(&self, inst: &Instance) -> Result<()> {
         let path = self.instance_path(&inst.id);
         let tmp = path.with_extension("tmp");
-        let content = serde_json::to_string_pretty(inst)?;
+        let dto: StoredInstance = inst.into();
+        let content = serde_json::to_string_pretty(&dto)?;
         std::fs::write(&tmp, &content)?;
         std::fs::rename(&tmp, &path)?;
         Ok(())
@@ -41,8 +44,8 @@ impl StateMachineStore {
         let path = self.instance_path(id);
         let content =
             std::fs::read_to_string(&path).with_context(|| format!("Instance '{id}' not found"))?;
-        let inst: Instance = serde_json::from_str(&content)?;
-        Ok(inst)
+        let dto: StoredInstance = serde_json::from_str(&content)?;
+        Ok(dto.into())
     }
 
     pub fn list_all(&self) -> Result<Vec<Instance>> {
@@ -53,8 +56,9 @@ impl StateMachineStore {
                 let path = entry.path();
                 if path.extension().map(|e| e == "json").unwrap_or(false)
                     && let Ok(content) = std::fs::read_to_string(&path)
-                    && let Ok(inst) = serde_json::from_str::<Instance>(&content)
+                    && let Ok(dto) = serde_json::from_str::<StoredInstance>(&content)
                 {
+                    let inst: Instance = dto.into();
                     instances.push(inst);
                 }
             }

@@ -1,4 +1,6 @@
-use crate::domain::context::ContextConfig;
+use crate::infra::dto::{
+    ConfigAgentRuntime, ConfigContextConfig, ConfigModelDef, ConfigSessionMode,
+};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -123,7 +125,7 @@ pub struct AgentDef {
     pub container: Option<ContainerConfig>,
     /// Agent runtime protocol: claude (default) or acp.
     #[serde(default)]
-    pub runtime: AgentRuntime,
+    pub runtime: ConfigAgentRuntime,
 }
 
 impl AgentDef {
@@ -194,10 +196,10 @@ pub struct UserConfig {
     pub mcp_config: Option<String>,
     /// State machine model definitions.
     #[serde(default)]
-    pub models: Vec<ModelDef>,
+    pub models: Vec<ConfigModelDef>,
     /// Context system configuration (main branch, compaction).
     #[serde(default)]
-    pub context: Option<ContextConfig>,
+    pub context: Option<ConfigContextConfig>,
 }
 
 fn default_model() -> String {
@@ -212,8 +214,7 @@ pub struct ChannelDef {
     pub description: String,
 }
 
-// SessionMode and AgentRuntime live in domain::agent; re-exported for backward compat.
-#[allow(unused_imports)]
+// Re-export domain types for backward compatibility.
 pub use crate::domain::agent::{AgentRuntime, SessionMode};
 
 /// A sub-agent running within a parent agent's bus scope.
@@ -232,10 +233,10 @@ pub struct SubAgentDef {
     /// Session mode: persistent (default) or ephemeral.
     /// Ephemeral agents start a fresh session for each task.
     #[serde(default)]
-    pub session: SessionMode,
+    pub session: ConfigSessionMode,
     /// Agent runtime protocol: claude (default) or acp.
     #[serde(default)]
-    pub runtime: AgentRuntime,
+    pub runtime: ConfigAgentRuntime,
 }
 
 /// Telegram channel routing config in the per-user deskd.yaml.
@@ -290,8 +291,6 @@ pub enum ScheduleAction {
     Shell,
 }
 
-// ModelDef and TransitionDef live in domain::statemachine; re-exported for backward compat.
-#[allow(unused_imports)]
 pub use crate::domain::statemachine::{ModelDef, TransitionDef};
 
 impl UserConfig {
@@ -452,7 +451,7 @@ agents:
             command: vec!["claude".into()],
             budget_usd: 50.0,
             container: None,
-            runtime: AgentRuntime::default(),
+            runtime: ConfigAgentRuntime::default(),
         };
         assert_eq!(def.bus_socket(), "/home/kira/.deskd/bus.sock");
         assert_eq!(def.config_path(), "/home/kira/deskd.yaml");
@@ -471,7 +470,7 @@ agents:
             command: vec!["claude".into()],
             budget_usd: 50.0,
             container: None,
-            runtime: AgentRuntime::default(),
+            runtime: ConfigAgentRuntime::default(),
         };
         assert_eq!(def.config_path(), "/etc/agents/kira.yaml");
     }
@@ -559,8 +558,8 @@ agents:
       - "agent:researcher"
 "#;
         let cfg: UserConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(cfg.agents[0].session, SessionMode::Ephemeral);
-        assert_eq!(cfg.agents[1].session, SessionMode::Persistent); // default
+        assert_eq!(cfg.agents[0].session, ConfigSessionMode::Ephemeral);
+        assert_eq!(cfg.agents[1].session, ConfigSessionMode::Persistent); // default
     }
 
     #[test]

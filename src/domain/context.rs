@@ -1,10 +1,8 @@
 //! Context domain types — pure data, no I/O.
-
-use serde::{Deserialize, Serialize};
+//! Serde lives on infra DTOs (infra::dto), not here.
 
 /// Node kinds in the context graph
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind")]
+#[derive(Debug, Clone)]
 pub enum NodeKind {
     /// Injected as-is into the session
     Static {
@@ -14,22 +12,20 @@ pub enum NodeKind {
     /// Executed at fork time, result injected
     Live {
         command: String, // shell command to execute
-        #[serde(default)]
         args: Vec<String>,
         max_age_secs: Option<u64>, // cache result for N seconds
         inject_as: String,         // role to inject result as
-        #[serde(skip)]
         cached_result: Option<CachedResult>,
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct CachedResult {
     pub content: String,
     pub fetched_at: String, // RFC3339
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct Node {
     pub id: String,
     pub kind: NodeKind,
@@ -38,7 +34,7 @@ pub struct Node {
 }
 
 /// The main branch — persistent context for an agent
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct MainBranch {
     pub agent: String,
     pub budget_tokens: u32, // target size for main
@@ -46,7 +42,7 @@ pub struct MainBranch {
 }
 
 /// Configuration for context system
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ContextConfig {
     pub enabled: bool,
     pub main_budget_tokens: Option<u32>,       // default 10000
@@ -54,7 +50,7 @@ pub struct ContextConfig {
     pub main_path: Option<String>,             // path to main branch file
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct MaterializedMessage {
     pub role: String,
     pub content: String,

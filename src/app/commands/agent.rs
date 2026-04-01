@@ -36,8 +36,8 @@ pub async fn handle(action: AgentAction) -> Result<()> {
                 },
                 config_path: None,
                 container: None,
-                session: config::SessionMode::default(),
-                runtime: config::AgentRuntime::default(),
+                session: crate::infra::dto::ConfigSessionMode::default(),
+                runtime: crate::infra::dto::ConfigAgentRuntime::default(),
             };
             let state = agent::create(&cfg).await?;
             println!("Agent {} created", state.config.name);

@@ -1116,7 +1116,7 @@ async fn call_task_list(args: &Value) -> Result<Value> {
             json!({
                 "id": t.id,
                 "description": t.description,
-                "status": t.status,
+                "status": t.status.to_string(),
                 "assignee": t.assignee,
                 "created_by": t.created_by,
                 "created_at": t.created_at,
@@ -1295,14 +1295,16 @@ async fn call_sm_create(
     let body = args.get("body").and_then(|b| b.as_str()).unwrap_or("");
 
     let cfg = user_config.context("no user config loaded — models not available")?;
-    let model = cfg
+    let model: statemachine::ModelDef = cfg
         .models
         .iter()
         .find(|m| m.name == model_name)
-        .ok_or_else(|| anyhow::anyhow!("model '{}' not found", model_name))?;
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("model '{}' not found", model_name))?
+        .into();
 
     let store = statemachine::StateMachineStore::default_for_home();
-    let inst = store.create(model, title, body, agent_name)?;
+    let inst = store.create(&model, title, body, agent_name)?;
     info!(agent = %agent_name, instance = %inst.id, model = %model_name, "sm_create via MCP");
 
     // If the initial state has an assignee, dispatch the first task via the bus.
@@ -1371,18 +1373,20 @@ async fn call_sm_move(
     let store = statemachine::StateMachineStore::default_for_home();
     let mut inst = store.load(id)?;
     let cfg = user_config.context("no user config loaded — models not available")?;
-    let model = cfg
+    let model: statemachine::ModelDef = cfg
         .models
         .iter()
         .find(|m| m.name == inst.model)
-        .ok_or_else(|| anyhow::anyhow!("model '{}' not found in config", inst.model))?;
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("model '{}' not found in config", inst.model))?
+        .into();
 
     let from = inst.state.clone();
-    store.move_to(&mut inst, model, state, agent_name, note)?;
+    store.move_to(&mut inst, &model, state, agent_name, note)?;
     info!(agent = %agent_name, instance = %id, from = %from, to = %state, "sm_move via MCP");
 
     // If the new state has an assignee, dispatch via bus.
-    if !inst.assignee.is_empty() && !statemachine::is_terminal(model, &inst) {
+    if !inst.assignee.is_empty() && !statemachine::is_terminal(&model, &inst) {
         let task_text = format!(
             "---\n## Task: {}\n\n{}\n\n---\n## Metadata\ninstance_id: {}\nmodel: {}\nstate: {}",
             inst.title, inst.body, inst.id, inst.model, inst.state
@@ -1429,7 +1433,8 @@ async fn call_sm_query(args: &Value) -> Result<Value> {
     if let Some(id) = args.get("id").and_then(|i| i.as_str()) {
         let store = statemachine::StateMachineStore::default_for_home();
         let inst = store.load(id)?;
-        let inst_json = serde_json::to_value(&inst)?;
+        let dto: crate::infra::dto::StoredInstance = (&inst).into();
+        let inst_json = serde_json::to_value(&dto)?;
         return Ok(json!({
             "content": [{"type": "text", "text": serde_json::to_string_pretty(&inst_json)?}],
             "isError": false
@@ -1687,8 +1692,8 @@ mod tests {
                 system_prompt: "Implements code changes.".into(),
                 subscribe: vec!["agent:dev".into()],
                 publish: None,
-                session: SessionMode::default(),
-                runtime: AgentRuntime::default(),
+                session: crate::infra::dto::ConfigSessionMode::default(),
+                runtime: crate::infra::dto::ConfigAgentRuntime::default(),
             }],
             telegram: Some(TelegramRoutesConfig {
                 routes: vec![TelegramRoute {

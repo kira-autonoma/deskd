@@ -8,7 +8,7 @@ use tokio::process::Command;
 use tracing::{debug, info, warn};
 
 use crate::config::{self, ContainerConfig, UserConfig};
-use crate::domain::agent::{AgentRuntime, SessionMode};
+use crate::infra::dto::{ConfigAgentRuntime, ConfigSessionMode};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -34,10 +34,10 @@ pub struct AgentConfig {
     pub container: Option<ContainerConfig>,
     /// Session mode: persistent (default) or ephemeral.
     #[serde(default)]
-    pub session: SessionMode,
+    pub session: ConfigSessionMode,
     /// Agent runtime protocol: claude (default) or acp.
     #[serde(default)]
-    pub runtime: AgentRuntime,
+    pub runtime: ConfigAgentRuntime,
 }
 
 fn default_budget_usd() -> f64 {
@@ -179,7 +179,7 @@ pub async fn create_or_recover(
         command: def.command.clone(),
         config_path: Some(def.config_path()),
         container: def.container.clone(),
-        session: SessionMode::default(),
+        session: ConfigSessionMode::default(),
         runtime: def.runtime.clone(),
     };
 
@@ -254,7 +254,7 @@ async fn send_inner(
 
     // Use --resume only when session is persistent and session_id exists.
     let use_resume =
-        state.config.session == SessionMode::Persistent && !state.session_id.is_empty();
+        state.config.session == ConfigSessionMode::Persistent && !state.session_id.is_empty();
 
     if use_resume {
         args.push("--resume".to_string());
@@ -449,7 +449,7 @@ async fn send_inner(
     let stderr_str = stderr_task.await.unwrap_or_default();
 
     // Only save session_id for persistent agents.
-    if state.config.session == SessionMode::Persistent && !new_session_id.is_empty() {
+    if state.config.session == ConfigSessionMode::Persistent && !new_session_id.is_empty() {
         state.session_id = new_session_id;
     }
     state.total_cost += task_cost;
@@ -711,8 +711,8 @@ pub async fn spawn_ephemeral(
         command: default_agent_command(),
         config_path: None,
         container: None,
-        session: SessionMode::default(),
-        runtime: AgentRuntime::default(),
+        session: ConfigSessionMode::default(),
+        runtime: ConfigAgentRuntime::default(),
     };
 
     create(&cfg).await?;
@@ -883,7 +883,7 @@ impl AgentProcess {
     pub async fn start(name: &str, bus_socket: &str) -> Result<Self> {
         let state = load_state(name)?;
         let will_resume =
-            state.config.session == SessionMode::Persistent && !state.session_id.is_empty();
+            state.config.session == ConfigSessionMode::Persistent && !state.session_id.is_empty();
 
         let (stdin_tx, event_rx, child) = Self::spawn_process(name, bus_socket, false).await?;
 
@@ -988,7 +988,7 @@ impl AgentProcess {
 
         // Use --resume only when session is persistent and fresh is not requested.
         let use_resume = !fresh
-            && state.config.session == SessionMode::Persistent
+            && state.config.session == ConfigSessionMode::Persistent
             && !state.session_id.is_empty();
 
         if use_resume {
@@ -1399,7 +1399,7 @@ impl AgentProcess {
                     // Update state file with deltas.
                     if let Ok(mut state) = load_state(&self.name) {
                         // Only save session_id for persistent agents.
-                        if state.config.session == SessionMode::Persistent
+                        if state.config.session == ConfigSessionMode::Persistent
                             && !result.session_id.is_empty()
                         {
                             state.session_id = result.session_id.clone();
@@ -1515,8 +1515,8 @@ created_at: "2024-01-01T00:00:00Z"
             command: vec!["claude".to_string()],
             config_path: Some("/home/agent1/deskd.yaml".to_string()),
             container: None,
-            session: SessionMode::default(),
-            runtime: AgentRuntime::default(),
+            session: ConfigSessionMode::default(),
+            runtime: ConfigAgentRuntime::default(),
         };
         let state = AgentState {
             config: cfg,
@@ -1632,8 +1632,8 @@ created_at: "2024-01-01T00:00:00Z"
             ],
             config_path: Some("/home/test/deskd.yaml".to_string()),
             container: Some(container),
-            session: SessionMode::default(),
-            runtime: AgentRuntime::default(),
+            session: ConfigSessionMode::default(),
+            runtime: ConfigAgentRuntime::default(),
         };
 
         let extra_env = [("DESKD_BUS_SOCKET", "/home/test/.deskd/bus.sock")];
@@ -1682,8 +1682,8 @@ created_at: "2024-01-01T00:00:00Z"
             command: vec!["claude".to_string()],
             config_path: None,
             container: None,
-            session: SessionMode::default(),
-            runtime: AgentRuntime::default(),
+            session: ConfigSessionMode::default(),
+            runtime: ConfigAgentRuntime::default(),
         };
         let cmd = build_command(&cfg, &[], &[]);
         let program = cmd.as_std().get_program().to_string_lossy().to_string();
@@ -1844,8 +1844,8 @@ created_at: "2024-01-01T00:00:00Z"
             command: vec!["claude".to_string()],
             config_path: None,
             container: None,
-            session: SessionMode::default(),
-            runtime: AgentRuntime::default(),
+            session: ConfigSessionMode::default(),
+            runtime: ConfigAgentRuntime::default(),
         };
         let state = AgentState {
             config: cfg,
@@ -1885,8 +1885,8 @@ created_at: "2024-01-01T00:00:00Z"
             command: vec!["claude".to_string()],
             config_path: None,
             container: None,
-            session: SessionMode::default(),
-            runtime: AgentRuntime::default(),
+            session: ConfigSessionMode::default(),
+            runtime: ConfigAgentRuntime::default(),
         };
         let extra_env = [("DESKD_BUS_SOCKET", "/tmp/bus.sock")];
         let cmd = build_command(&cfg, &[], &extra_env);

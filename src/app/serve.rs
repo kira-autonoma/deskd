@@ -149,7 +149,8 @@ pub async fn serve(config_path: String) -> Result<()> {
             && !ucfg.models.is_empty()
         {
             let bus = bus_socket.clone();
-            let models = ucfg.models.clone();
+            let models: Vec<crate::domain::statemachine::ModelDef> =
+                ucfg.models.iter().cloned().map(Into::into).collect();
             let agent_name = def.name.clone();
             tokio::spawn(async move {
                 if let Err(e) = workflow::run(&bus, models).await {

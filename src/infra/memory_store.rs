@@ -1,6 +1,7 @@
 //! In-memory implementations of store traits for testing.
 //!
-//! No filesystem, no I/O — pure in-memory state.
+//! Stores data as infra DTOs internally, converting to/from domain types
+//! at trait boundaries — same pattern as the file-backed stores.
 
 use anyhow::{Result, bail};
 use std::collections::HashMap;
@@ -8,13 +9,14 @@ use std::sync::Mutex;
 
 use crate::domain::statemachine::{Instance, ModelDef, Transition};
 use crate::domain::task::{QueueSummary, Task, TaskCriteria, TaskStatus, matches_criteria};
+use crate::infra::dto::{StoredInstance, StoredTask};
 use crate::ports::store::{StateMachineRepository, TaskRepository};
 
 // ─── InMemoryTaskStore ───────────────────────────────────────────────────────
 
-/// Test-only task store backed by a HashMap.
+/// Test-only task store backed by a HashMap of StoredTask DTOs.
 pub struct InMemoryTaskStore {
-    tasks: Mutex<HashMap<String, Task>>,
+    tasks: Mutex<HashMap<String, StoredTask>>,
 }
 
 impl InMemoryTaskStore {
@@ -37,6 +39,7 @@ impl TaskRepository for InMemoryTaskStore {
         tasks
             .get(id)
             .cloned()
+            .map(Into::into)
             .ok_or_else(|| anyhow::anyhow!("Task '{}' not found", id))
     }
 
@@ -56,7 +59,8 @@ impl TaskRepository for InMemoryTaskStore {
             created_by: created_by.to_string(),
             sm_instance_id: None,
         };
-        self.tasks.lock().unwrap().insert(id, task.clone());
+        let dto: StoredTask = (&task).into();
+        self.tasks.lock().unwrap().insert(id, dto);
         Ok(task)
     }
 
@@ -69,10 +73,8 @@ impl TaskRepository for InMemoryTaskStore {
     ) -> Result<Task> {
         let mut task = self.create(description, criteria, created_by)?;
         task.sm_instance_id = Some(sm_instance_id.to_string());
-        self.tasks
-            .lock()
-            .unwrap()
-            .insert(task.id.clone(), task.clone());
+        let dto: StoredTask = (&task).into();
+        self.tasks.lock().unwrap().insert(task.id.clone(), dto);
         Ok(task)
     }
 
@@ -80,8 +82,9 @@ impl TaskRepository for InMemoryTaskStore {
         let tasks = self.tasks.lock().unwrap();
         let mut result: Vec<Task> = tasks
             .values()
-            .filter(|t| status_filter.is_none() || Some(t.status) == status_filter)
             .cloned()
+            .map(Into::into)
+            .filter(|t: &Task| status_filter.is_none() || Some(t.status) == status_filter)
             .collect();
         result.sort_by(|a, b| a.created_at.cmp(&b.created_at));
         Ok(result)
@@ -89,15 +92,17 @@ impl TaskRepository for InMemoryTaskStore {
 
     fn cancel(&self, id: &str) -> Result<Task> {
         let mut tasks = self.tasks.lock().unwrap();
-        let task = tasks
-            .get_mut(id)
+        let dto = tasks
+            .get(id)
             .ok_or_else(|| anyhow::anyhow!("Task '{}' not found", id))?;
+        let mut task: Task = dto.clone().into();
         if task.status != TaskStatus::Pending {
             bail!("Cannot cancel task '{}': status is '{}'", id, task.status);
         }
         task.status = TaskStatus::Cancelled;
         task.updated_at = chrono::Utc::now().to_rfc3339();
-        Ok(task.clone())
+        tasks.insert(id.to_string(), (&task).into());
+        Ok(task)
     }
 
     fn claim_next(
@@ -109,6 +114,8 @@ impl TaskRepository for InMemoryTaskStore {
         let mut tasks = self.tasks.lock().unwrap();
         let mut pending: Vec<String> = tasks
             .values()
+            .cloned()
+            .map(|dto| -> Task { dto.into() })
             .filter(|t| {
                 t.status == TaskStatus::Pending
                     && matches_criteria(&t.criteria, agent_model, agent_labels)
@@ -118,11 +125,13 @@ impl TaskRepository for InMemoryTaskStore {
         pending.sort();
 
         if let Some(id) = pending.first() {
-            let task = tasks.get_mut(id).unwrap();
+            let dto = tasks.get(id).unwrap();
+            let mut task: Task = dto.clone().into();
             task.status = TaskStatus::Active;
             task.assignee = Some(agent_name.to_string());
             task.updated_at = chrono::Utc::now().to_rfc3339();
-            Ok(Some(task.clone()))
+            tasks.insert(id.clone(), (&task).into());
+            Ok(Some(task))
         } else {
             Ok(None)
         }
@@ -130,30 +139,34 @@ impl TaskRepository for InMemoryTaskStore {
 
     fn complete(&self, id: &str, result_text: &str) -> Result<Task> {
         let mut tasks = self.tasks.lock().unwrap();
-        let task = tasks
-            .get_mut(id)
+        let dto = tasks
+            .get(id)
             .ok_or_else(|| anyhow::anyhow!("Task '{}' not found", id))?;
+        let mut task: Task = dto.clone().into();
         if task.status != TaskStatus::Active {
             bail!("Cannot complete task '{}': status is '{}'", id, task.status);
         }
         task.status = TaskStatus::Done;
         task.result = Some(result_text.to_string());
         task.updated_at = chrono::Utc::now().to_rfc3339();
-        Ok(task.clone())
+        tasks.insert(id.to_string(), (&task).into());
+        Ok(task)
     }
 
     fn fail(&self, id: &str, error_msg: &str) -> Result<Task> {
         let mut tasks = self.tasks.lock().unwrap();
-        let task = tasks
-            .get_mut(id)
+        let dto = tasks
+            .get(id)
             .ok_or_else(|| anyhow::anyhow!("Task '{}' not found", id))?;
+        let mut task: Task = dto.clone().into();
         if task.status != TaskStatus::Active {
             bail!("Cannot fail task '{}': status is '{}'", id, task.status);
         }
         task.status = TaskStatus::Failed;
         task.error = Some(error_msg.to_string());
         task.updated_at = chrono::Utc::now().to_rfc3339();
-        Ok(task.clone())
+        tasks.insert(id.to_string(), (&task).into());
+        Ok(task)
     }
 
     fn queue_summary(&self) -> QueueSummary {
@@ -164,8 +177,9 @@ impl TaskRepository for InMemoryTaskStore {
             done: 0,
             failed: 0,
         };
-        for t in tasks.values() {
-            match t.status {
+        for dto in tasks.values() {
+            let task: Task = dto.clone().into();
+            match task.status {
                 TaskStatus::Pending => s.pending += 1,
                 TaskStatus::Active => s.active += 1,
                 TaskStatus::Done => s.done += 1,
@@ -179,9 +193,9 @@ impl TaskRepository for InMemoryTaskStore {
 
 // ─── InMemoryStateMachineStore ───────────────────────────────────────────────
 
-/// Test-only state machine store backed by a HashMap.
+/// Test-only state machine store backed by a HashMap of StoredInstance DTOs.
 pub struct InMemoryStateMachineStore {
-    instances: Mutex<HashMap<String, Instance>>,
+    instances: Mutex<HashMap<String, StoredInstance>>,
 }
 
 impl InMemoryStateMachineStore {
@@ -200,10 +214,8 @@ impl Default for InMemoryStateMachineStore {
 
 impl StateMachineRepository for InMemoryStateMachineStore {
     fn save(&self, inst: &Instance) -> Result<()> {
-        self.instances
-            .lock()
-            .unwrap()
-            .insert(inst.id.clone(), inst.clone());
+        let dto: StoredInstance = inst.into();
+        self.instances.lock().unwrap().insert(inst.id.clone(), dto);
         Ok(())
     }
 
@@ -213,12 +225,13 @@ impl StateMachineRepository for InMemoryStateMachineStore {
             .unwrap()
             .get(id)
             .cloned()
+            .map(Into::into)
             .ok_or_else(|| anyhow::anyhow!("Instance '{}' not found", id))
     }
 
     fn list_all(&self) -> Result<Vec<Instance>> {
         let instances = self.instances.lock().unwrap();
-        let mut result: Vec<Instance> = instances.values().cloned().collect();
+        let mut result: Vec<Instance> = instances.values().cloned().map(Into::into).collect();
         result.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         Ok(result)
     }
@@ -272,7 +285,8 @@ impl StateMachineRepository for InMemoryStateMachineStore {
             history: Vec::new(),
             metadata: serde_json::Value::Null,
         };
-        self.instances.lock().unwrap().insert(id, inst.clone());
+        let dto: StoredInstance = (&inst).into();
+        self.instances.lock().unwrap().insert(id, dto);
         Ok(inst)
     }
 
@@ -326,10 +340,8 @@ impl StateMachineRepository for InMemoryStateMachineStore {
             inst.assignee = a.clone();
         }
 
-        self.instances
-            .lock()
-            .unwrap()
-            .insert(inst.id.clone(), inst.clone());
+        let dto: StoredInstance = (&*inst).into();
+        self.instances.lock().unwrap().insert(inst.id.clone(), dto);
         Ok(())
     }
 }

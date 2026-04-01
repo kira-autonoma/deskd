@@ -10,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
 use crate::app::agent::{self, AgentConfig, TaskLimits, TokenUsage, TurnResult, build_command};
-use crate::domain::agent::SessionMode;
+use crate::infra::dto::ConfigSessionMode;
 
 // ─── JSON-RPC 2.0 types ─────────────────────────────────────────────────────
 
@@ -405,7 +405,7 @@ impl AcpProcess {
 
         // Create or load session.
         let session_id = if !fresh
-            && state.config.session == SessionMode::Persistent
+            && state.config.session == ConfigSessionMode::Persistent
             && !state.session_id.is_empty()
         {
             process.do_session_load(&state.session_id).await?
@@ -608,7 +608,7 @@ impl AcpProcess {
 
         // Update agent state.
         if let Ok(mut state) = agent::load_state(&self.name) {
-            if state.config.session == SessionMode::Persistent {
+            if state.config.session == ConfigSessionMode::Persistent {
                 state.session_id = session_id;
             }
             // ACP doesn't report cost — we track turns only.
