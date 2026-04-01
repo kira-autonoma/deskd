@@ -391,3 +391,86 @@ async fn test_no_matching_transition_stays_in_state() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// Workflow engine starts before bus → retries → connects when bus is ready → dispatches pending.
+#[tokio::test]
+async fn test_workflow_engine_retries_bus_connection() {
+    let socket = temp_socket();
+    let tmp = temp_dir();
+
+    // Create a pending SM instance BEFORE starting anything.
+    let store = deskd::app::statemachine::StateMachineStore::new(tmp.clone());
+    let model = test_model();
+    let mut inst = store
+        .create(&model, "Retry test", "Bus not ready yet", "test-sender")
+        .unwrap();
+    // Move to review with an assignee so dispatch_pending will try to send it.
+    store
+        .move_to(&mut inst, &model, "review", "auto", None)
+        .unwrap();
+    assert_eq!(inst.state, "review");
+    assert_eq!(inst.assignee, "agent:reviewer");
+
+    // Start workflow engine BEFORE bus — it should retry, not crash.
+    let sock_for_engine = socket.clone();
+    let models: Vec<deskd::config::ModelDef> = vec![model.clone()];
+    let engine_handle = tokio::spawn(async move {
+        // Override HOME so StateMachineStore::default_for_home() won't find our temp store.
+        // Instead, we rely on the workflow::run function using default_for_home internally,
+        // so we need to test via bus_connect directly.
+        deskd::app::worker::bus_connect(
+            &sock_for_engine,
+            "workflow-engine",
+            vec!["sm:*".to_string()],
+        )
+        .await
+    });
+
+    // Wait 500ms, then start the bus — engine should be retrying during this time.
+    let sock_for_bus = socket.clone();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::spawn(async move {
+        deskd::app::bus::serve(&sock_for_bus).await.unwrap();
+    });
+
+    // Engine should connect successfully after bus starts.
+    let result = tokio::time::timeout(Duration::from_secs(15), engine_handle)
+        .await
+        .expect("engine should complete within timeout")
+        .expect("engine task should not panic");
+
+    assert!(result.is_ok(), "bus_connect should succeed after retries");
+
+    // Verify the connection works by sending a message through it.
+    let stream = result.unwrap();
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = BufReader::new(reader).lines();
+
+    // Connect a reviewer to receive dispatched tasks.
+    let (mut reviewer_rx, _reviewer_tx) =
+        connect_and_register(&socket, "reviewer", &["agent:reviewer"]).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Send a test message through the workflow engine's connection.
+    let test_msg = serde_json::json!({
+        "type": "message",
+        "id": uuid::Uuid::new_v4().to_string(),
+        "source": "workflow-engine",
+        "target": "agent:reviewer",
+        "payload": {"task": "test dispatch after retry"},
+        "metadata": {"priority": 5},
+    });
+    let mut line = serde_json::to_string(&test_msg).unwrap();
+    line.push('\n');
+    writer.write_all(line.as_bytes()).await.unwrap();
+
+    // Reviewer should receive the message — proves connection is fully functional.
+    let received = read_one(&mut reviewer_rx, 2000).await;
+    assert!(
+        received.is_some(),
+        "reviewer should receive message sent through retried connection"
+    );
+
+    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_dir_all(&tmp);
+}

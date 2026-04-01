@@ -1,11 +1,11 @@
 use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::app::message::Message;
 use crate::app::statemachine;
+use crate::app::worker;
 use crate::domain::statemachine::ModelDef;
 
 type Writer = std::sync::Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>;
@@ -16,17 +16,10 @@ type Writer = std::sync::Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf
 pub async fn run(socket_path: &str, models: Vec<ModelDef>) -> Result<()> {
     let store = statemachine::StateMachineStore::default_for_home();
 
-    let stream = UnixStream::connect(socket_path).await?;
-    let reg = serde_json::json!({
-        "type": "register",
-        "name": "workflow-engine",
-        "subscriptions": ["sm:*"]
-    });
-    let mut line = serde_json::to_string(&reg)?;
-    line.push('\n');
+    let stream =
+        worker::bus_connect(socket_path, "workflow-engine", vec!["sm:*".to_string()]).await?;
 
-    let (reader, mut writer_half) = stream.into_split();
-    writer_half.write_all(line.as_bytes()).await?;
+    let (reader, writer_half) = stream.into_split();
 
     let writer: Writer = std::sync::Arc::new(tokio::sync::Mutex::new(writer_half));
     let mut lines = BufReader::new(reader).lines();
