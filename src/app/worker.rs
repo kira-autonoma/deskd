@@ -847,7 +847,7 @@ async fn handle_task_success(
             }
             format!("{}...", &response[..end])
         } else {
-            response
+            response.clone()
         };
         if let Err(e) = store.complete(tq_id, &result_text) {
             warn!(agent = %name, task_id = %tq_id, error = %e, "failed to mark queue task done");
@@ -858,7 +858,7 @@ async fn handle_task_success(
         writer,
         name,
         &ctx.reply_target,
-        serde_json::json!({"final": true, "in_reply_to": msg.id}),
+        serde_json::json!({"result": response, "final": true, "in_reply_to": msg.id}),
     )
     .await;
 }
