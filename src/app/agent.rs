@@ -7,7 +7,8 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tracing::{debug, info, warn};
 
-use crate::config::{self, AgentRuntime, ContainerConfig, SessionMode, UserConfig};
+use crate::config::{self, ContainerConfig, UserConfig};
+use crate::domain::agent::{AgentRuntime, SessionMode};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {

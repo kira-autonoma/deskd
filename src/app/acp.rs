@@ -10,7 +10,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
 use crate::app::agent::{self, AgentConfig, TaskLimits, TokenUsage, TurnResult, build_command};
-use crate::config::SessionMode;
+use crate::domain::agent::SessionMode;
 
 // ─── JSON-RPC 2.0 types ─────────────────────────────────────────────────────
 

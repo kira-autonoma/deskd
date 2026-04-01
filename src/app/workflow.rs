@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::app::message::Message;
 use crate::app::statemachine;
-use crate::config::ModelDef;
+use crate::domain::statemachine::ModelDef;
 
 type Writer = std::sync::Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>;
 
@@ -315,7 +315,7 @@ async fn dispatch_pending(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::TransitionDef;
+    use crate::domain::statemachine::TransitionDef;
 
     fn test_model() -> ModelDef {
         ModelDef {

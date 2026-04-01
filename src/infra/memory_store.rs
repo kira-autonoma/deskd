@@ -6,8 +6,7 @@ use anyhow::{Result, bail};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::config::ModelDef;
-use crate::domain::statemachine::{Instance, Transition};
+use crate::domain::statemachine::{Instance, ModelDef, Transition};
 use crate::domain::task::{QueueSummary, Task, TaskCriteria, TaskStatus, matches_criteria};
 use crate::ports::store::{StateMachineRepository, TaskRepository};
 
@@ -338,7 +337,7 @@ impl StateMachineRepository for InMemoryStateMachineStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ModelDef, TransitionDef};
+    use crate::domain::statemachine::{ModelDef, TransitionDef};
     use crate::domain::task::TaskCriteria;
 
     #[test]

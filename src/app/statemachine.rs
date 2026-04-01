@@ -220,7 +220,7 @@ impl crate::ports::store::StateMachineRepository for StateMachineStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ModelDef, TransitionDef};
+    use crate::domain::statemachine::{ModelDef, TransitionDef};
 
     fn temp_store() -> StateMachineStore {
         let dir = std::env::temp_dir().join(format!("deskd-test-{}", uuid::Uuid::new_v4()));

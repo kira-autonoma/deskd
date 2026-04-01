@@ -10,7 +10,7 @@ use crate::app::agent::{self, TokenUsage};
 use crate::app::message::Message;
 use crate::app::tasklog;
 use crate::app::unified_inbox;
-use crate::config::{AgentRuntime, SessionMode};
+use crate::domain::agent::{AgentRuntime, SessionMode};
 
 /// Wrapper for either a Claude or ACP agent process.
 enum RuntimeProcess {

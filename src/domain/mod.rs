@@ -3,6 +3,7 @@
 //! This module depends only on `std` and `serde`. It must never import from
 //! `infra`, `app`, `adapters`, or any other outer layer.
 
+pub mod agent;
 pub mod message;
 pub mod statemachine;
 pub mod task;
