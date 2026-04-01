@@ -1,5 +1,6 @@
 use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixStream;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
