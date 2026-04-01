@@ -1,4 +1,4 @@
-use crate::app::context::ContextConfig;
+use crate::domain::context::ContextConfig;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

@@ -4,6 +4,7 @@
 //! `infra`, `app`, `adapters`, or any other outer layer.
 
 pub mod agent;
+pub mod context;
 pub mod message;
 pub mod statemachine;
 pub mod task;
