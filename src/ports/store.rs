@@ -5,8 +5,17 @@
 
 use anyhow::Result;
 
+use std::path::Path;
+
+use crate::domain::context::MainBranch;
 use crate::domain::statemachine::{Instance, ModelDef};
 use crate::domain::task::{QueueSummary, Task, TaskCriteria, TaskStatus};
+
+/// Persistence operations for context branches (MainBranch YAML files).
+pub trait ContextRepository: Send + Sync {
+    fn load(&self, path: &Path) -> Result<MainBranch>;
+    fn save(&self, branch: &MainBranch, path: &Path) -> Result<()>;
+}
 
 /// Persistence operations for the task queue.
 pub trait TaskRepository: Send + Sync {

@@ -1,30 +1,24 @@
 //! Context application layer — I/O operations on context types.
 //!
 //! Pure domain types live in `domain::context`. This module adds
-//! persistence (load/save) and materialization (execute live nodes).
+//! persistence (load/save via ContextRepository) and materialization
+//! (execute live nodes).
 
-use crate::infra::dto::StoredMainBranch;
+use crate::infra::context_store::FileContextStore;
+use crate::ports::store::ContextRepository;
 
 // Re-export all domain types for backward compatibility.
 pub use crate::domain::context::*;
 
 impl MainBranch {
-    /// Load from YAML file
+    /// Load from YAML file (convenience wrapper over ContextRepository).
     pub fn load(path: &std::path::Path) -> anyhow::Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let dto: StoredMainBranch = serde_yaml::from_str(&content)?;
-        Ok(dto.into())
+        FileContextStore::new().load(path)
     }
 
-    /// Save to YAML file
+    /// Save to YAML file (convenience wrapper over ContextRepository).
     pub fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let dto: StoredMainBranch = self.into();
-        let content = serde_yaml::to_string(&dto)?;
-        std::fs::write(path, content)?;
-        Ok(())
+        FileContextStore::new().save(self, path)
     }
 
     /// Materialize: execute live nodes and produce message list for session injection
