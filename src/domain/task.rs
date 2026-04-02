@@ -52,6 +52,10 @@ pub struct Task {
     pub created_by: String,
     /// Linked state machine instance ID (set when task is created by SM dispatch).
     pub sm_instance_id: Option<String>,
+    /// Cost in USD for this task (set on completion).
+    pub cost_usd: Option<f64>,
+    /// Number of turns used (set on completion).
+    pub turns: Option<u32>,
 }
 
 /// Summary of the queue for status display.

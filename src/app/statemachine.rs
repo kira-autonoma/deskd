@@ -107,6 +107,8 @@ impl StateMachineStore {
             updated_at: now,
             history: Vec::new(),
             metadata: serde_json::Value::Null,
+            total_cost: 0.0,
+            total_turns: 0,
         };
         self.save(&inst)?;
         info!(id = %inst.id, model = %inst.model, state = %inst.state, "instance created");
@@ -114,6 +116,8 @@ impl StateMachineStore {
     }
 
     /// Move an instance to a new state. Validates that the transition is allowed.
+    /// Optionally records cost and turns for this step, accumulating into totals.
+    #[allow(clippy::too_many_arguments)]
     pub fn move_to(
         &self,
         inst: &mut Instance,
@@ -121,6 +125,8 @@ impl StateMachineStore {
         target_state: &str,
         trigger: &str,
         note: Option<&str>,
+        cost_usd: Option<f64>,
+        turns: Option<u32>,
     ) -> Result<()> {
         // Validate target state exists.
         if !model.states.contains(&target_state.to_string()) {
@@ -154,7 +160,16 @@ impl StateMachineStore {
             trigger: trigger.to_string(),
             timestamp: now.clone(),
             note: note.map(|s| s.to_string()),
+            cost_usd,
+            turns,
         };
+
+        if let Some(c) = cost_usd {
+            inst.total_cost += c;
+        }
+        if let Some(t) = turns {
+            inst.total_turns += t;
+        }
 
         inst.history.push(transition);
         inst.state = target_state.to_string();
@@ -216,8 +231,10 @@ impl crate::ports::store::StateMachineRepository for StateMachineStore {
         target_state: &str,
         trigger: &str,
         note: Option<&str>,
+        cost_usd: Option<f64>,
+        turns: Option<u32>,
     ) -> Result<()> {
-        self.move_to(inst, model, target_state, trigger, note)
+        self.move_to(inst, model, target_state, trigger, note, cost_usd, turns)
     }
 }
 
@@ -322,7 +339,7 @@ mod tests {
         assert_eq!(inst.state, "open");
 
         store
-            .move_to(&mut inst, &model, "in_review", "manual", None)
+            .move_to(&mut inst, &model, "in_review", "manual", None, None, None)
             .unwrap();
         assert_eq!(inst.state, "in_review");
         assert_eq!(inst.history.len(), 1);
@@ -336,6 +353,8 @@ mod tests {
                 "approved",
                 "keyword:approve",
                 Some("LGTM"),
+                None,
+                None,
             )
             .unwrap();
         assert_eq!(inst.state, "approved");
@@ -349,7 +368,7 @@ mod tests {
         let model = test_model();
         let mut inst = store.create(&model, "Test invalid", "", "kira").unwrap();
         // Cannot go directly from open to approved.
-        let result = store.move_to(&mut inst, &model, "approved", "manual", None);
+        let result = store.move_to(&mut inst, &model, "approved", "manual", None, None, None);
         assert!(result.is_err());
         assert!(
             result
@@ -364,7 +383,7 @@ mod tests {
         let store = temp_store();
         let model = test_model();
         let mut inst = store.create(&model, "Test bad state", "", "kira").unwrap();
-        let result = store.move_to(&mut inst, &model, "nonexistent", "manual", None);
+        let result = store.move_to(&mut inst, &model, "nonexistent", "manual", None, None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not defined"));
     }
@@ -386,7 +405,15 @@ mod tests {
         let mut inst = store.create(&model, "Test cancel", "", "kira").unwrap();
         // Wildcard transition allows cancel from any state.
         store
-            .move_to(&mut inst, &model, "rejected", "cancel", Some("Cancelled"))
+            .move_to(
+                &mut inst,
+                &model,
+                "rejected",
+                "cancel",
+                Some("Cancelled"),
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(inst.state, "rejected");
         assert!(is_terminal(&model, &inst));
@@ -441,6 +468,8 @@ mod tests {
             updated_at: String::new(),
             history: vec![],
             metadata: serde_json::Value::Null,
+            total_cost: 0.0,
+            total_turns: 0,
         };
         assert!(!is_terminal(&model, &inst_open));
 

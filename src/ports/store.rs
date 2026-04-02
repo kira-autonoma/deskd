@@ -27,7 +27,13 @@ pub trait TaskRepository: Send + Sync {
         agent_model: &str,
         agent_labels: &[String],
     ) -> Result<Option<Task>>;
-    fn complete(&self, id: &str, result_text: &str) -> Result<Task>;
+    fn complete(
+        &self,
+        id: &str,
+        result_text: &str,
+        cost_usd: Option<f64>,
+        turns: Option<u32>,
+    ) -> Result<Task>;
     fn fail(&self, id: &str, error_msg: &str) -> Result<Task>;
     fn queue_summary(&self) -> QueueSummary;
 }
@@ -45,6 +51,7 @@ pub trait StateMachineRepository: Send + Sync {
         body: &str,
         created_by: &str,
     ) -> Result<Instance>;
+    #[allow(clippy::too_many_arguments)]
     fn move_to(
         &self,
         inst: &mut Instance,
@@ -52,5 +59,7 @@ pub trait StateMachineRepository: Send + Sync {
         target_state: &str,
         trigger: &str,
         note: Option<&str>,
+        cost_usd: Option<f64>,
+        turns: Option<u32>,
     ) -> Result<()>;
 }

@@ -850,7 +850,12 @@ async fn handle_task_success(
         } else {
             response.clone()
         };
-        if let Err(e) = store.complete(tq_id, &result_text) {
+        if let Err(e) = store.complete(
+            tq_id,
+            &result_text,
+            Some(turn.cost_usd),
+            Some(turn.num_turns),
+        ) {
             warn!(agent = %name, task_id = %tq_id, error = %e, "failed to mark queue task done");
         }
     }

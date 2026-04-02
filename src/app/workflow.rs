@@ -148,7 +148,7 @@ async fn handle_completion(
     let target_state = find_next_state(model, &current_state, result);
 
     if let Some(target) = target_state {
-        store.move_to(&mut inst, model, &target, "auto", Some(result))?;
+        store.move_to(&mut inst, model, &target, "auto", Some(result), None, None)?;
 
         info!(
             instance = %instance_id,
@@ -543,6 +543,8 @@ mod tests {
             updated_at: String::new(),
             history: vec![],
             metadata: serde_json::Value::Null,
+            total_cost: 0.0,
+            total_turns: 0,
         };
         let text = build_task_text("Review this code.", &inst);
         assert!(text.contains("Review this code."));
@@ -567,6 +569,8 @@ mod tests {
             updated_at: String::new(),
             history: vec![],
             metadata: serde_json::Value::Null,
+            total_cost: 0.0,
+            total_turns: 0,
         };
         let text = build_task_text("", &inst);
         assert!(text.contains("Previous output here"));
@@ -656,7 +660,7 @@ mod tests {
         // Move to planning — this transition has criteria.
         let mut inst = inst;
         sm_store
-            .move_to(&mut inst, &model, "planning", "start", None)
+            .move_to(&mut inst, &model, "planning", "start", None, None, None)
             .unwrap();
         assert_eq!(inst.state, "planning");
         assert_eq!(inst.assignee, "agent:planner");
@@ -700,6 +704,8 @@ mod tests {
                 "implementing",
                 "auto",
                 Some("Plan: implement X, Y, Z"),
+                None,
+                None,
             )
             .unwrap();
         assert_eq!(inst.state, "implementing");
@@ -727,7 +733,7 @@ mod tests {
         let final_target = find_next_state(&model, "implementing", "Done: all implemented");
         assert_eq!(final_target, Some("done".into()));
         sm_store
-            .move_to(&mut inst, &model, "done", "auto", None)
+            .move_to(&mut inst, &model, "done", "auto", None, None, None)
             .unwrap();
         assert!(statemachine::is_terminal(&model, &inst));
 

@@ -35,16 +35,20 @@ pub fn handle(action: TaskAction) -> Result<()> {
                 return Ok(());
             }
             println!(
-                "{:<14} {:<10} {:<14} {:<14} DESCRIPTION",
-                "ID", "STATUS", "ASSIGNEE", "SM"
+                "{:<14} {:<10} {:<10} {:<14} {:<14} DESCRIPTION",
+                "ID", "STATUS", "COST", "ASSIGNEE", "SM"
             );
             for t in &tasks {
                 let assignee = t.assignee.as_deref().unwrap_or("-");
                 let sm = t.sm_instance_id.as_deref().unwrap_or("-");
+                let cost = t
+                    .cost_usd
+                    .map(|c| format!("${:.4}", c))
+                    .unwrap_or_else(|| "-".into());
                 let desc = truncate(&t.description, 50);
                 println!(
-                    "{:<14} {:<10} {:<14} {:<14} {}",
-                    t.id, t.status, assignee, sm, desc
+                    "{:<14} {:<10} {:<10} {:<14} {:<14} {}",
+                    t.id, t.status, cost, assignee, sm, desc
                 );
             }
         }

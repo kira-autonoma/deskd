@@ -102,6 +102,8 @@ impl TaskStore {
             updated_at: now,
             created_by: created_by.to_string(),
             sm_instance_id,
+            cost_usd: None,
+            turns: None,
         };
 
         self.save(&task)?;
@@ -208,8 +210,14 @@ impl TaskStore {
         Ok(task)
     }
 
-    /// Mark a task as completed.
-    pub fn complete(&self, id: &str, result_text: &str) -> Result<Task> {
+    /// Mark a task as completed, optionally recording cost and turn count.
+    pub fn complete(
+        &self,
+        id: &str,
+        result_text: &str,
+        cost_usd: Option<f64>,
+        turns: Option<u32>,
+    ) -> Result<Task> {
         let mut task = self.load(id)?;
         if task.status != TaskStatus::Active {
             bail!(
@@ -220,6 +228,8 @@ impl TaskStore {
         }
         task.status = TaskStatus::Done;
         task.result = Some(result_text.to_string());
+        task.cost_usd = cost_usd;
+        task.turns = turns;
         task.updated_at = Utc::now().to_rfc3339();
         self.save(&task)?;
         Ok(task)
@@ -294,8 +304,14 @@ impl crate::ports::store::TaskRepository for TaskStore {
     ) -> Result<Option<Task>> {
         self.claim_next(agent_name, agent_model, agent_labels)
     }
-    fn complete(&self, id: &str, result_text: &str) -> Result<Task> {
-        self.complete(id, result_text)
+    fn complete(
+        &self,
+        id: &str,
+        result_text: &str,
+        cost_usd: Option<f64>,
+        turns: Option<u32>,
+    ) -> Result<Task> {
+        self.complete(id, result_text, cost_usd, turns)
     }
     fn fail(&self, id: &str, error_msg: &str) -> Result<Task> {
         self.fail(id, error_msg)
@@ -428,7 +444,7 @@ mod tests {
         store.claim_next("w1", "any", &[]).unwrap(); // claims t1
         store.claim_next("w2", "any", &[]).unwrap(); // claims t2
 
-        let done = store.complete(&t1.id, "All good").unwrap();
+        let done = store.complete(&t1.id, "All good", None, None).unwrap();
         assert_eq!(done.status, TaskStatus::Done);
         assert_eq!(done.result.as_deref(), Some("All good"));
 

@@ -48,6 +48,10 @@ pub struct Instance {
     pub updated_at: String,
     pub history: Vec<Transition>,
     pub metadata: serde_json::Value,
+    /// Cumulative cost across all transitions.
+    pub total_cost: f64,
+    /// Cumulative turns across all transitions.
+    pub total_turns: u32,
 }
 
 /// A recorded transition in the instance history.
@@ -58,4 +62,8 @@ pub struct Transition {
     pub trigger: String,
     pub timestamp: String,
     pub note: Option<String>,
+    /// Cost in USD for the step that triggered this transition.
+    pub cost_usd: Option<f64>,
+    /// Number of turns for the step.
+    pub turns: Option<u32>,
 }

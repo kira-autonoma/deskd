@@ -118,6 +118,10 @@ pub struct StoredTask {
     pub criteria: StoredTaskCriteria,
     #[serde(default)]
     pub sm_instance_id: Option<String>,
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub turns: Option<u32>,
 }
 
 /// Storage format for task matching criteria.
@@ -158,6 +162,8 @@ impl From<StoredTask> for Task {
                 labels: dto.criteria.labels,
             },
             sm_instance_id: dto.sm_instance_id,
+            cost_usd: dto.cost_usd,
+            turns: dto.turns,
         }
     }
 }
@@ -186,6 +192,8 @@ impl From<&Task> for StoredTask {
                 labels: task.criteria.labels.clone(),
             },
             sm_instance_id: task.sm_instance_id.clone(),
+            cost_usd: task.cost_usd,
+            turns: task.turns,
         }
     }
 }
@@ -212,6 +220,10 @@ pub struct StoredInstance {
     pub history: Vec<StoredTransition>,
     #[serde(default)]
     pub metadata: serde_json::Value,
+    #[serde(default)]
+    pub total_cost: f64,
+    #[serde(default)]
+    pub total_turns: u32,
 }
 
 /// Storage format for a recorded state transition.
@@ -223,6 +235,10 @@ pub struct StoredTransition {
     pub timestamp: String,
     #[serde(default)]
     pub note: Option<String>,
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    #[serde(default)]
+    pub turns: Option<u32>,
 }
 
 use crate::domain::statemachine::{Instance, Transition};
@@ -243,6 +259,8 @@ impl From<StoredInstance> for Instance {
             updated_at: dto.updated_at,
             history: dto.history.into_iter().map(Into::into).collect(),
             metadata: dto.metadata,
+            total_cost: dto.total_cost,
+            total_turns: dto.total_turns,
         }
     }
 }
@@ -263,6 +281,8 @@ impl From<&Instance> for StoredInstance {
             updated_at: inst.updated_at.clone(),
             history: inst.history.iter().map(Into::into).collect(),
             metadata: inst.metadata.clone(),
+            total_cost: inst.total_cost,
+            total_turns: inst.total_turns,
         }
     }
 }
@@ -275,6 +295,8 @@ impl From<StoredTransition> for Transition {
             trigger: dto.trigger,
             timestamp: dto.timestamp,
             note: dto.note,
+            cost_usd: dto.cost_usd,
+            turns: dto.turns,
         }
     }
 }
@@ -287,6 +309,8 @@ impl From<&Transition> for StoredTransition {
             trigger: t.trigger.clone(),
             timestamp: t.timestamp.clone(),
             note: t.note.clone(),
+            cost_usd: t.cost_usd,
+            turns: t.turns,
         }
     }
 }
@@ -755,6 +779,8 @@ mod tests {
                 labels: vec!["rust".into()],
             },
             sm_instance_id: None,
+            cost_usd: None,
+            turns: None,
         };
         let stored: StoredTask = (&task).into();
         assert_eq!(stored.status, "active");
@@ -787,8 +813,12 @@ mod tests {
                 trigger: "create".into(),
                 timestamp: "2026-01-01T00:00:00Z".into(),
                 note: None,
+                cost_usd: None,
+                turns: None,
             }],
             metadata: serde_json::json!({}),
+            total_cost: 0.0,
+            total_turns: 0,
         };
         let stored: StoredInstance = (&inst).into();
         let restored: Instance = stored.into();

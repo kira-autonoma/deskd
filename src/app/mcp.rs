@@ -1382,7 +1382,7 @@ async fn call_sm_move(
         .into();
 
     let from = inst.state.clone();
-    store.move_to(&mut inst, &model, state, agent_name, note)?;
+    store.move_to(&mut inst, &model, state, agent_name, note, None, None)?;
     info!(agent = %agent_name, instance = %id, from = %from, to = %state, "sm_move via MCP");
 
     // Notify workflow engine to dispatch if the new state has an assignee.

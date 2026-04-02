@@ -58,6 +58,8 @@ impl TaskRepository for InMemoryTaskStore {
             updated_at: now,
             created_by: created_by.to_string(),
             sm_instance_id: None,
+            cost_usd: None,
+            turns: None,
         };
         let dto: StoredTask = (&task).into();
         self.tasks.lock().unwrap().insert(id, dto);
@@ -137,7 +139,13 @@ impl TaskRepository for InMemoryTaskStore {
         }
     }
 
-    fn complete(&self, id: &str, result_text: &str) -> Result<Task> {
+    fn complete(
+        &self,
+        id: &str,
+        result_text: &str,
+        cost_usd: Option<f64>,
+        turns: Option<u32>,
+    ) -> Result<Task> {
         let mut tasks = self.tasks.lock().unwrap();
         let dto = tasks
             .get(id)
@@ -148,6 +156,8 @@ impl TaskRepository for InMemoryTaskStore {
         }
         task.status = TaskStatus::Done;
         task.result = Some(result_text.to_string());
+        task.cost_usd = cost_usd;
+        task.turns = turns;
         task.updated_at = chrono::Utc::now().to_rfc3339();
         tasks.insert(id.to_string(), (&task).into());
         Ok(task)
@@ -284,6 +294,8 @@ impl StateMachineRepository for InMemoryStateMachineStore {
             updated_at: now,
             history: Vec::new(),
             metadata: serde_json::Value::Null,
+            total_cost: 0.0,
+            total_turns: 0,
         };
         let dto: StoredInstance = (&inst).into();
         self.instances.lock().unwrap().insert(id, dto);
@@ -297,6 +309,8 @@ impl StateMachineRepository for InMemoryStateMachineStore {
         target_state: &str,
         trigger: &str,
         note: Option<&str>,
+        cost_usd: Option<f64>,
+        turns: Option<u32>,
     ) -> Result<()> {
         if !model.states.contains(&target_state.to_string()) {
             bail!(
@@ -328,7 +342,16 @@ impl StateMachineRepository for InMemoryStateMachineStore {
             trigger: trigger.to_string(),
             timestamp: now.clone(),
             note: note.map(|s| s.to_string()),
+            cost_usd,
+            turns,
         };
+
+        if let Some(c) = cost_usd {
+            inst.total_cost += c;
+        }
+        if let Some(t) = turns {
+            inst.total_turns += t;
+        }
 
         inst.history.push(transition);
         inst.state = target_state.to_string();
@@ -369,7 +392,7 @@ mod tests {
             .unwrap();
         assert_eq!(claimed.status, TaskStatus::Active);
 
-        let done = store.complete(&claimed.id, "Fixed it").unwrap();
+        let done = store.complete(&claimed.id, "Fixed it", None, None).unwrap();
         assert_eq!(done.status, TaskStatus::Done);
 
         let summary = store.queue_summary();
@@ -426,12 +449,20 @@ mod tests {
 
         let mut inst = store.load(&inst.id).unwrap();
         store
-            .move_to(&mut inst, &model, "in_review", "start", None)
+            .move_to(&mut inst, &model, "in_review", "start", None, None, None)
             .unwrap();
         assert_eq!(inst.state, "in_review");
 
         store
-            .move_to(&mut inst, &model, "done", "approve", Some("LGTM"))
+            .move_to(
+                &mut inst,
+                &model,
+                "done",
+                "approve",
+                Some("LGTM"),
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(inst.state, "done");
         assert_eq!(inst.history.len(), 2);

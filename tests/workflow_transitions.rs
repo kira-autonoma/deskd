@@ -232,7 +232,15 @@ async fn test_completion_triggers_transition_and_dispatch() {
 
     let target_state = next_state.unwrap();
     store
-        .move_to(&mut inst, &model, &target_state, "auto", Some(result))
+        .move_to(
+            &mut inst,
+            &model,
+            &target_state,
+            "auto",
+            Some(result),
+            None,
+            None,
+        )
         .unwrap();
 
     // Verify state transitioned.
@@ -315,7 +323,7 @@ async fn test_keyword_transition_lgtm_approves() {
         .create(&model, "Review PR #99", "Add caching layer", "kira")
         .unwrap();
     store
-        .move_to(&mut inst, &model, "review", "auto", None)
+        .move_to(&mut inst, &model, "review", "auto", None, None, None)
         .unwrap();
     assert_eq!(inst.state, "review");
 
@@ -325,7 +333,15 @@ async fn test_keyword_transition_lgtm_approves() {
     assert_eq!(next, Some("approved".into()));
 
     store
-        .move_to(&mut inst, &model, "approved", "auto", Some(result))
+        .move_to(
+            &mut inst,
+            &model,
+            "approved",
+            "auto",
+            Some(result),
+            None,
+            None,
+        )
         .unwrap();
     assert_eq!(inst.state, "approved");
     assert!(deskd::app::statemachine::is_terminal(&model, &inst));
@@ -352,7 +368,7 @@ async fn test_keyword_transition_reject() {
         .create(&model, "Review PR #100", "Risky change", "kira")
         .unwrap();
     store
-        .move_to(&mut inst, &model, "review", "auto", None)
+        .move_to(&mut inst, &model, "review", "auto", None, None, None)
         .unwrap();
 
     let result = "REJECT: missing error handling in critical path";
@@ -360,7 +376,15 @@ async fn test_keyword_transition_reject() {
     assert_eq!(next, Some("rejected".into()));
 
     store
-        .move_to(&mut inst, &model, "rejected", "auto", Some(result))
+        .move_to(
+            &mut inst,
+            &model,
+            "rejected",
+            "auto",
+            Some(result),
+            None,
+            None,
+        )
         .unwrap();
     assert!(deskd::app::statemachine::is_terminal(&model, &inst));
 
@@ -378,7 +402,7 @@ async fn test_no_matching_transition_stays_in_state() {
         .create(&model, "Review PR #101", "Unclear change", "kira")
         .unwrap();
     store
-        .move_to(&mut inst, &model, "review", "auto", None)
+        .move_to(&mut inst, &model, "review", "auto", None, None, None)
         .unwrap();
 
     // Result doesn't match LGTM or REJECT — no transition.
@@ -406,7 +430,7 @@ async fn test_workflow_engine_retries_bus_connection() {
         .unwrap();
     // Move to review with an assignee so dispatch_pending will try to send it.
     store
-        .move_to(&mut inst, &model, "review", "auto", None)
+        .move_to(&mut inst, &model, "review", "auto", None, None, None)
         .unwrap();
     assert_eq!(inst.state, "review");
     assert_eq!(inst.assignee, "agent:reviewer");
@@ -485,7 +509,7 @@ async fn test_sm_move_notifies_workflow_engine() {
         .create(&model, "Move test", "Testing move dispatch", "cli")
         .unwrap();
     store
-        .move_to(&mut inst, &model, "review", "manual", None)
+        .move_to(&mut inst, &model, "review", "manual", None, None, None)
         .unwrap();
     assert_eq!(inst.state, "review");
     assert_eq!(inst.assignee, "agent:reviewer");
@@ -548,7 +572,7 @@ async fn test_dispatch_pending_skips_completed_instances() {
         .create(&model, "Already done", "Work was already completed", "test")
         .unwrap();
     store
-        .move_to(&mut completed, &model, "review", "auto", None)
+        .move_to(&mut completed, &model, "review", "auto", None, None, None)
         .unwrap();
     completed.result = Some("This task is done.".to_string());
     store.save(&completed).unwrap();
@@ -558,7 +582,7 @@ async fn test_dispatch_pending_skips_completed_instances() {
         .create(&model, "Still pending", "Work not started yet", "test")
         .unwrap();
     store
-        .move_to(&mut pending, &model, "review", "auto", None)
+        .move_to(&mut pending, &model, "review", "auto", None, None, None)
         .unwrap();
     assert!(pending.result.is_none());
 
