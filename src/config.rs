@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-// Re-export path helpers for backward compatibility.
-pub use crate::app::paths::{agent_bus_socket, log_dir, reminders_dir, state_dir};
+// Re-export path helpers (infra layer — filesystem layout concerns).
+pub use crate::infra::paths::{agent_bus_socket, log_dir, reminders_dir, state_dir};
 
 /// A one-shot reminder that fires at a specific time and posts a message to the bus.
 #[derive(Debug, Clone, Serialize, Deserialize)]

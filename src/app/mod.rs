@@ -13,7 +13,6 @@ pub mod context;
 pub mod graph;
 pub mod mcp;
 pub mod message;
-pub mod paths;
 pub mod schedule;
 pub mod serve;
 pub mod statemachine;
