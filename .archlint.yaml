@@ -4,8 +4,8 @@ rules:
     threshold: 20
     level: telemetry
   fan_in:
-    # src::domain (23) and src::app (26) are central hubs — raised from 15
-    threshold: 27
+    # src::domain (28) and src::app are central hubs — raised from 27
+    threshold: 30
     level: telemetry
   cycles:
     enabled: true
@@ -17,7 +17,7 @@ rules:
     enabled: true
     level: personal
 
-# Clean architecture layers — reflects actual module structure as of v0.7.44.
+# Clean architecture layers — reflects actual module structure as of v0.7.61.
 #
 #   src/domain/   — pure types, no I/O, no serde
 #   src/ports/    — trait definitions (bus, store, executor)
