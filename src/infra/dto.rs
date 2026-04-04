@@ -124,6 +124,8 @@ pub struct StoredTask {
     pub turns: Option<u32>,
     #[serde(default)]
     pub metadata: serde_json::Value,
+    #[serde(default)]
+    pub timed_out_at: Option<String>,
 }
 
 /// Storage format for task matching criteria.
@@ -167,6 +169,7 @@ impl From<StoredTask> for Task {
             cost_usd: dto.cost_usd,
             turns: dto.turns,
             metadata: dto.metadata,
+            timed_out_at: dto.timed_out_at,
         }
     }
 }
@@ -198,6 +201,7 @@ impl From<&Task> for StoredTask {
             cost_usd: task.cost_usd,
             turns: task.turns,
             metadata: task.metadata.clone(),
+            timed_out_at: task.timed_out_at.clone(),
         }
     }
 }
@@ -786,6 +790,7 @@ mod tests {
             cost_usd: None,
             turns: None,
             metadata: serde_json::Value::Null,
+            timed_out_at: None,
         };
         let stored: StoredTask = (&task).into();
         assert_eq!(stored.status, "active");

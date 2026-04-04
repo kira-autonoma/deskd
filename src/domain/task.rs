@@ -58,6 +58,8 @@ pub struct Task {
     pub turns: Option<u32>,
     /// Structured metadata (JSON object, e.g. worktree path, branch, repo URL).
     pub metadata: serde_json::Value,
+    /// Timestamp when the task was timed out by the sweep loop (RFC 3339).
+    pub timed_out_at: Option<String>,
 }
 
 /// Summary of the queue for status display.

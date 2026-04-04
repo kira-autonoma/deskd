@@ -96,6 +96,7 @@ impl TaskWriter for InMemoryTaskStore {
             cost_usd: None,
             turns: None,
             metadata: serde_json::Value::Null,
+            timed_out_at: None,
         };
         let dto: StoredTask = (&task).into();
         self.tasks.lock().unwrap().insert(id, dto);

@@ -18,6 +18,7 @@ pub mod serve;
 pub mod statemachine;
 pub mod task;
 pub mod tasklog;
+pub mod timeout_sweep;
 pub mod unified_inbox;
 pub mod worker;
 pub mod workflow;

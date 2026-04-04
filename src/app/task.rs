@@ -124,6 +124,7 @@ impl TaskStore {
             cost_usd: None,
             turns: None,
             metadata,
+            timed_out_at: None,
         };
 
         self.save(&task)?;
@@ -268,6 +269,29 @@ impl TaskStore {
         task.status = TaskStatus::Failed;
         task.error = Some(error_msg.to_string());
         task.updated_at = Utc::now().to_rfc3339();
+        self.save(&task)?;
+        Ok(task)
+    }
+
+    /// Mark an active or pending task as failed due to a timeout.
+    ///
+    /// Unlike `fail`, this method accepts tasks in either `Active` or `Pending`
+    /// state (a pending task may time out before an agent even claims it).
+    /// Sets `timed_out_at` in addition to the standard `Failed` fields.
+    pub fn timeout_fail(&self, id: &str, error_msg: &str) -> Result<Task> {
+        let mut task = self.load(id)?;
+        if task.status != TaskStatus::Active && task.status != TaskStatus::Pending {
+            bail!(
+                "Cannot timeout task '{}': status is '{}' (must be active or pending)",
+                id,
+                task.status
+            );
+        }
+        let now = Utc::now().to_rfc3339();
+        task.status = TaskStatus::Failed;
+        task.error = Some(error_msg.to_string());
+        task.timed_out_at = Some(now.clone());
+        task.updated_at = now;
         self.save(&task)?;
         Ok(task)
     }
@@ -496,5 +520,49 @@ mod tests {
         let s = store.queue_summary();
         assert_eq!(s.pending, 2);
         assert_eq!(s.active, 0);
+    }
+
+    #[test]
+    fn test_timeout_fail_active_task() {
+        let store = temp_store();
+        store
+            .create("Slow task", TaskCriteria::default(), "kira")
+            .unwrap();
+
+        let claimed = store.claim_next("agent-1", "any", &[]).unwrap().unwrap();
+        assert_eq!(claimed.status, TaskStatus::Active);
+
+        let timed = store
+            .timeout_fail(&claimed.id, "timed out after 60s")
+            .unwrap();
+        assert_eq!(timed.status, TaskStatus::Failed);
+        assert!(timed.timed_out_at.is_some());
+        assert_eq!(timed.error.as_deref(), Some("timed out after 60s"));
+    }
+
+    #[test]
+    fn test_timeout_fail_pending_task() {
+        let store = temp_store();
+        let task = store
+            .create("Unclaimed task", TaskCriteria::default(), "kira")
+            .unwrap();
+
+        let timed = store.timeout_fail(&task.id, "never claimed").unwrap();
+        assert_eq!(timed.status, TaskStatus::Failed);
+        assert!(timed.timed_out_at.is_some());
+    }
+
+    #[test]
+    fn test_timeout_fail_rejects_done_task() {
+        let store = temp_store();
+        store
+            .create("Done task", TaskCriteria::default(), "kira")
+            .unwrap();
+
+        let claimed = store.claim_next("agent-1", "any", &[]).unwrap().unwrap();
+        store.complete(&claimed.id, "all good", None, None).unwrap();
+
+        let result = store.timeout_fail(&claimed.id, "too late");
+        assert!(result.is_err());
     }
 }

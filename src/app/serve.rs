@@ -179,6 +179,15 @@ pub async fn serve(config_path: String) -> Result<()> {
             let models: Vec<crate::domain::statemachine::ModelDef> =
                 ucfg.models.iter().cloned().map(Into::into).collect();
             let agent_name = def.name.clone();
+
+            // Start timeout sweep loop alongside the workflow engine.
+            let sweep_models = models.clone();
+            let sweep_interval = std::time::Duration::from_secs(30);
+            tokio::spawn(async move {
+                crate::app::timeout_sweep::run_timeout_sweep(sweep_models, sweep_interval).await;
+            });
+            info!(agent = %def.name, "started timeout sweep loop (interval=30s)");
+
             tokio::spawn(async move {
                 if let Err(e) = workflow::run(&bus, models).await {
                     tracing::error!(agent = %agent_name, error = %e, "workflow engine exited");

@@ -186,6 +186,36 @@ impl StateMachineStore {
         info!(id = %inst.id, from = %from_state, to = %target_state, "state transition");
         Ok(())
     }
+
+    /// Force-move an instance to a new state, bypassing transition validation.
+    ///
+    /// Used by the timeout sweep loop to enforce `timeout_goto` even when no
+    /// explicit transition edge exists from the current state to the target.
+    pub fn force_transition(
+        &self,
+        inst: &mut Instance,
+        target_state: &str,
+        trigger: &str,
+        note: Option<&str>,
+    ) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+        let from_state = inst.state.clone();
+        let transition = Transition {
+            from: from_state.clone(),
+            to: target_state.to_string(),
+            trigger: trigger.to_string(),
+            timestamp: now.clone(),
+            note: note.map(|s| s.to_string()),
+            cost_usd: None,
+            turns: None,
+        };
+        inst.history.push(transition);
+        inst.state = target_state.to_string();
+        inst.updated_at = now;
+        self.save(inst)?;
+        info!(id = %inst.id, from = %from_state, to = %target_state, trigger = %trigger, "forced state transition");
+        Ok(())
+    }
 }
 
 /// Find valid transitions from the current state.
