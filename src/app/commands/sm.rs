@@ -105,10 +105,30 @@ pub async fn handle(
             // Notify workflow engine if the new state has an assignee.
             if !inst.assignee.is_empty() && !statemachine::is_terminal(m, &inst) {
                 let bus_socket = std::env::var("DESKD_BUS_SOCKET").unwrap_or_else(|_| {
-                    let work_dir = std::path::Path::new(config_path)
-                        .parent()
-                        .unwrap_or(std::path::Path::new("."));
-                    config::agent_bus_socket(&work_dir.to_string_lossy())
+                    // Derive the agent name from the assignee (strip "agent:" prefix).
+                    let agent_name = inst
+                        .assignee
+                        .strip_prefix("agent:")
+                        .unwrap_or(&inst.assignee);
+                    // Look up the bus socket from the serve state file. This is the
+                    // correct approach after configs moved from {work_dir}/deskd.yaml to
+                    // ~/.deskd/configs/agent.yaml — the config path parent is no longer
+                    // the agent's work_dir.
+                    let socket = config::ServeState::load()
+                        .and_then(|state| state.agent(agent_name).map(|a| a.bus_socket.clone()))
+                        .unwrap_or_else(|| {
+                            // Fallback: derive from config_path parent (legacy layout).
+                            let work_dir = std::path::Path::new(config_path)
+                                .parent()
+                                .unwrap_or(std::path::Path::new("."));
+                            config::agent_bus_socket(&work_dir.to_string_lossy())
+                        });
+                    tracing::debug!(
+                        assignee = %inst.assignee,
+                        bus_socket = %socket,
+                        "resolved bus socket for workflow notification"
+                    );
+                    socket
                 });
                 if std::path::Path::new(&bus_socket).exists()
                     && let Err(e) = workflow::notify_moved(&bus_socket, &id, "cli").await

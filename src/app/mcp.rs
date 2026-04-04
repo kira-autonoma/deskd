@@ -787,12 +787,22 @@ async fn call_add_persistent_agent(
         run_args.push("--subscribe".to_string());
         run_args.push(sub.clone());
     }
-    let child = tokio::process::Command::new(&deskd_bin)
+    let mut child = tokio::process::Command::new(&deskd_bin)
         .args(&run_args)
         .env("DESKD_BUS_SOCKET", &bus_socket)
         .env("DESKD_AGENT_NAME", name)
         .spawn()
         .with_context(|| format!("failed to spawn worker for agent '{}'", name))?;
+
+    // Write the worker PID to the state file so `agent status` can detect it.
+    let worker_pid = child.id().unwrap_or(0);
+    if worker_pid > 0
+        && let Ok(mut state) = crate::app::agent::load_state(name)
+    {
+        state.pid = worker_pid;
+        crate::app::agent::save_state_pub(&state).ok();
+        info!(parent = %parent_name, agent = %name, pid = worker_pid, "wrote sub-agent PID to state");
+    }
 
     // Track the sub-agent in the internal bus for routing and cleanup.
     {
@@ -802,7 +812,6 @@ async fn call_add_persistent_agent(
             let agent_name = name.to_string();
             let handle = tokio::spawn(async move {
                 // Wait for the child process — just holds the handle for abort.
-                let mut child = child;
                 let _ = child.wait().await;
             });
             ibus.worker_handles.push((agent_name, handle));
@@ -810,6 +819,31 @@ async fn call_add_persistent_agent(
     }
 
     info!(parent = %parent_name, agent = %name, bus = %bus_socket, "persistent sub-agent spawned on internal bus");
+
+    // Poll until the worker registers on the bus (up to 30s), so callers can
+    // safely send_message immediately after this call returns.
+    let agent_name_owned = name.to_string();
+    let bus_socket_poll = bus_socket.clone();
+    let poll_timeout = std::time::Duration::from_secs(30);
+    let poll_interval = tokio::time::Duration::from_millis(200);
+    let registered = tokio::time::timeout(poll_timeout, async {
+        loop {
+            if let Ok(clients) = crate::app::serve::query_live_agents(&bus_socket_poll).await
+                && clients.contains(&agent_name_owned)
+            {
+                break true;
+            }
+            tokio::time::sleep(poll_interval).await;
+        }
+    })
+    .await
+    .unwrap_or(false);
+
+    if registered {
+        info!(parent = %parent_name, agent = %name, "sub-agent registered on internal bus");
+    } else {
+        warn!(parent = %parent_name, agent = %name, "timed out waiting for sub-agent to register on bus (30s)");
+    }
 
     let subscribe_display = subscribe.join(", ");
     Ok(json!({
