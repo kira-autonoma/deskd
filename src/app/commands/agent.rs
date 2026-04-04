@@ -124,22 +124,47 @@ pub async fn handle(action: AgentAction) -> Result<()> {
                     }
                 }
             }
+            // Also check internal buses for sub-agents: each parent agent may
+            // have an internal bus at /tmp/deskd-{parent}-internal.sock.
+            let parent_names: std::collections::HashSet<String> =
+                agents.iter().filter_map(|a| a.parent.clone()).collect();
+            for parent in &parent_names {
+                let internal_sock = format!("/tmp/deskd-{}-internal.sock", parent);
+                if let Ok(more) = crate::app::serve::query_live_agents(&internal_sock).await {
+                    live.extend(more);
+                }
+            }
 
             if agents.is_empty() {
                 println!("No agents registered");
             } else {
                 println!(
-                    "{:<15} {:<7} {:<8} {:<10} {:<12} MODEL",
+                    "{:<15} {:<10} {:<8} {:<10} {:<12} MODEL",
                     "NAME", "STATUS", "TURNS", "COST", "USER"
                 );
                 for a in agents {
                     let status = if live.contains(&a.config.name) {
-                        "live"
+                        if a.parent.is_some() {
+                            "live[sub]".to_string()
+                        } else {
+                            "live".to_string()
+                        }
+                    } else if a.pid > 0
+                        && std::path::Path::new(&format!("/proc/{}", a.pid)).exists()
+                    {
+                        // PID is alive but not yet registered on the bus.
+                        if a.parent.is_some() {
+                            "run[sub]".to_string()
+                        } else {
+                            "running".to_string()
+                        }
+                    } else if a.parent.is_some() {
+                        "idle[sub]".to_string()
                     } else {
-                        "idle"
+                        "idle".to_string()
                     };
                     println!(
-                        "{:<15} {:<7} {:<8} ${:<9.2} {:<12} {}",
+                        "{:<15} {:<10} {:<8} ${:<9.2} {:<12} {}",
                         a.config.name,
                         status,
                         a.total_turns,
@@ -336,8 +361,26 @@ pub async fn handle(action: AgentAction) -> Result<()> {
                 let s = agent::load_state(&name)?;
                 let pid_alive =
                     s.pid > 0 && std::path::Path::new(&format!("/proc/{}", s.pid)).exists();
-                let status_str = if pid_alive { &s.status } else { "offline" };
+                // For sub-agents on an internal bus, also check the internal bus socket.
+                let on_internal_bus = if let Some(ref parent) = s.parent {
+                    let internal_sock = format!("/tmp/deskd-{}-internal.sock", parent);
+                    crate::app::serve::query_live_agents(&internal_sock)
+                        .await
+                        .map(|live| live.contains(&s.config.name))
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                let status_str = if pid_alive || on_internal_bus {
+                    s.status.as_str()
+                } else {
+                    "offline"
+                };
+                let is_sub_agent = s.parent.is_some();
                 println!("Agent:       {}", s.config.name);
+                if is_sub_agent {
+                    println!("Type:        sub-agent");
+                }
                 println!("Status:      {}", status_str);
                 println!(
                     "PID:         {}",
@@ -379,21 +422,33 @@ pub async fn handle(action: AgentAction) -> Result<()> {
                     println!("No agents registered");
                 } else {
                     println!(
-                        "{:<15} {:<9} {:<6} {:<10} {:<20} MODEL",
+                        "{:<15} {:<12} {:<6} {:<10} {:<20} MODEL",
                         "NAME", "STATUS", "TURNS", "COST", "CREATED"
                     );
-                    println!("{}", "─".repeat(75));
+                    println!("{}", "─".repeat(78));
                     for a in &agents {
                         let pid_alive =
                             a.pid > 0 && std::path::Path::new(&format!("/proc/{}", a.pid)).exists();
-                        let status = if pid_alive { &a.status } else { "offline" };
+                        // Sub-agents: treat as alive if their PID is alive even if
+                        // we can't reach the internal bus from the CLI.
+                        let status = if pid_alive {
+                            if a.parent.is_some() {
+                                format!("{}[sub]", a.status)
+                            } else {
+                                a.status.clone()
+                            }
+                        } else if a.parent.is_some() {
+                            "offline[sub]".to_string()
+                        } else {
+                            "offline".to_string()
+                        };
                         let created = if a.created_at.len() > 19 {
                             &a.created_at[..19]
                         } else {
                             &a.created_at
                         };
                         println!(
-                            "{:<15} {:<9} {:<6} ${:<9.4} {:<20} {}",
+                            "{:<15} {:<12} {:<6} ${:<9.4} {:<20} {}",
                             a.config.name,
                             status,
                             a.total_turns,
