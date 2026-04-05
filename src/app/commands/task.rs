@@ -26,15 +26,23 @@ pub fn handle(action: TaskAction) -> Result<()> {
             };
             println!("Created task {} (pending)", t.id);
         }
-        TaskAction::List { status } => {
-            let filter = match status.as_deref() {
-                Some("pending") => Some(task::TaskStatus::Pending),
-                Some("active") => Some(task::TaskStatus::Active),
-                Some("done") => Some(task::TaskStatus::Done),
-                Some("failed") => Some(task::TaskStatus::Failed),
-                Some("cancelled") => Some(task::TaskStatus::Cancelled),
-                Some(other) => anyhow::bail!("Unknown status: {}", other),
-                None => None,
+        TaskAction::List {
+            status,
+            dead_letter,
+        } => {
+            let filter = if dead_letter {
+                Some(task::TaskStatus::DeadLetter)
+            } else {
+                match status.as_deref() {
+                    Some("pending") => Some(task::TaskStatus::Pending),
+                    Some("active") => Some(task::TaskStatus::Active),
+                    Some("done") => Some(task::TaskStatus::Done),
+                    Some("failed") => Some(task::TaskStatus::Failed),
+                    Some("cancelled") => Some(task::TaskStatus::Cancelled),
+                    Some("dead_letter") => Some(task::TaskStatus::DeadLetter),
+                    Some(other) => anyhow::bail!("Unknown status: {}", other),
+                    None => None,
+                }
             };
             let tasks = store.list(filter)?;
             if tasks.is_empty() {

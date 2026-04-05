@@ -1153,6 +1153,7 @@ async fn call_task_list(args: &Value) -> Result<Value> {
             "done" => Some(crate::app::task::TaskStatus::Done),
             "failed" => Some(crate::app::task::TaskStatus::Failed),
             "cancelled" => Some(crate::app::task::TaskStatus::Cancelled),
+            "dead_letter" => Some(crate::app::task::TaskStatus::DeadLetter),
             _ => None,
         });
 

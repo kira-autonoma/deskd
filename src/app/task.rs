@@ -311,7 +311,7 @@ impl TaskStore {
                 TaskStatus::Active => s.active += 1,
                 TaskStatus::Done => s.done += 1,
                 TaskStatus::Failed => s.failed += 1,
-                TaskStatus::Cancelled => {}
+                TaskStatus::Cancelled | TaskStatus::DeadLetter => {}
             }
         }
         s

@@ -150,6 +150,7 @@ impl From<StoredTask> for Task {
                 "done" => TaskStatus::Done,
                 "failed" => TaskStatus::Failed,
                 "cancelled" => TaskStatus::Cancelled,
+                "dead_letter" => TaskStatus::DeadLetter,
                 other => {
                     warn!(status = other, "unknown task status, defaulting to Pending");
                     TaskStatus::Pending
@@ -185,6 +186,7 @@ impl From<&Task> for StoredTask {
                 TaskStatus::Done => "done",
                 TaskStatus::Failed => "failed",
                 TaskStatus::Cancelled => "cancelled",
+                TaskStatus::DeadLetter => "dead_letter",
             }
             .to_string(),
             assignee: task.assignee.clone(),

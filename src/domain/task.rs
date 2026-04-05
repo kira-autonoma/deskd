@@ -10,6 +10,8 @@ pub enum TaskStatus {
     Done,
     Failed,
     Cancelled,
+    /// Task permanently failed after exhausting all retries.
+    DeadLetter,
 }
 
 impl std::fmt::Display for TaskStatus {
@@ -20,6 +22,7 @@ impl std::fmt::Display for TaskStatus {
             Self::Done => write!(f, "done"),
             Self::Failed => write!(f, "failed"),
             Self::Cancelled => write!(f, "cancelled"),
+            Self::DeadLetter => write!(f, "dead_letter"),
         }
     }
 }

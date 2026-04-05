@@ -342,9 +342,12 @@ pub enum TaskAction {
     },
     /// List tasks in the queue.
     List {
-        /// Filter by status: pending, active, done, failed, cancelled.
+        /// Filter by status: pending, active, done, failed, cancelled, dead_letter.
         #[arg(long)]
         status: Option<String>,
+        /// Show only dead-lettered tasks (shorthand for --status dead_letter).
+        #[arg(long)]
+        dead_letter: bool,
     },
     /// Cancel a pending task.
     Cancel {
