@@ -21,8 +21,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::app::statemachine;
-use crate::app::unified_inbox;
+use crate::app::mcp_service;
 use crate::config::UserConfig;
 
 // ─── Embedded bus for sub-agent orchestration ────────────────────────────────
@@ -874,33 +873,14 @@ async fn call_create_reminder(args: &Value) -> Result<Value> {
         .and_then(|d| d.as_f64())
         .context("missing delay_minutes")?;
 
-    let fire_at =
-        chrono::Utc::now() + chrono::Duration::seconds((delay_minutes * 60.0).round() as i64);
-
-    let remind = crate::config::RemindDef {
-        at: fire_at.to_rfc3339(),
-        target: target.to_string(),
-        message: message.to_string(),
-    };
-
-    let dir = crate::config::reminders_dir();
-    let filename = format!("{}.json", uuid::Uuid::new_v4());
-    let path = dir.join(&filename);
-
-    let json = serde_json::to_string_pretty(&remind).context("failed to serialize reminder")?;
-    std::fs::write(&path, json)
-        .with_context(|| format!("failed to write reminder file: {}", path.display()))?;
-
-    info!(target = %target, at = %fire_at, "create_reminder via MCP");
+    let result = mcp_service::create_reminder(target, message, delay_minutes)?;
 
     Ok(json!({
         "content": [{
             "type": "text",
             "text": format!(
                 "Reminder scheduled: target={} at={} (in {:.0} minutes)",
-                target,
-                fire_at.to_rfc3339(),
-                delay_minutes
+                result.target, result.fire_at, result.delay_minutes
             )
         }],
         "isError": false
@@ -910,17 +890,7 @@ async fn call_create_reminder(args: &Value) -> Result<Value> {
 // ─── Unified inbox tool implementations ──────────────────────────────────────
 
 async fn call_list_inboxes() -> Result<Value> {
-    let inboxes = unified_inbox::list_inboxes().context("failed to list inboxes")?;
-
-    let summary: Vec<Value> = inboxes
-        .iter()
-        .map(|(name, count)| {
-            json!({
-                "inbox": name,
-                "messages": count,
-            })
-        })
-        .collect();
+    let summary = mcp_service::list_inboxes()?;
 
     Ok(json!({
         "content": [{"type": "text", "text": serde_json::to_string_pretty(&summary)?}],
@@ -940,21 +910,7 @@ async fn call_read_inbox(args: &Value) -> Result<Value> {
         .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&chrono::Utc));
 
-    let messages =
-        unified_inbox::read_messages(inbox, limit, since).context("failed to read inbox")?;
-
-    let output: Vec<Value> = messages
-        .iter()
-        .map(|m| {
-            json!({
-                "ts": m.ts.to_rfc3339(),
-                "source": m.source,
-                "from": m.from,
-                "text": m.text,
-                "metadata": m.metadata,
-            })
-        })
-        .collect();
+    let output = mcp_service::read_inbox(inbox, limit, since)?;
 
     Ok(json!({
         "content": [{"type": "text", "text": serde_json::to_string_pretty(&output)?}],
@@ -970,21 +926,7 @@ async fn call_search_inbox(args: &Value) -> Result<Value> {
         .context("missing query")?;
     let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(50) as usize;
 
-    let results =
-        unified_inbox::search_messages(inbox, query, limit).context("failed to search inbox")?;
-
-    let output: Vec<Value> = results
-        .iter()
-        .map(|m| {
-            json!({
-                "ts": m.ts.to_rfc3339(),
-                "source": m.source,
-                "from": m.from,
-                "text": m.text,
-                "metadata": m.metadata,
-            })
-        })
-        .collect();
+    let output = mcp_service::search_inbox(inbox, query, limit)?;
 
     Ok(json!({
         "content": [{"type": "text", "text": serde_json::to_string_pretty(&output)?}],
@@ -999,101 +941,10 @@ async fn call_run_graph(args: &Value) -> Result<Value> {
         .get("file")
         .and_then(|f| f.as_str())
         .context("missing file")?;
+    let work_dir = args.get("work_dir").and_then(|w| w.as_str());
+    let vars = args.get("vars");
 
-    let file_path = std::path::Path::new(file);
-    let abs_path = if file_path.is_absolute() {
-        file_path.to_path_buf()
-    } else {
-        let cwd = std::env::var("PWD").unwrap_or_else(|_| ".".to_string());
-        std::path::Path::new(&cwd).join(file_path)
-    };
-
-    let work_dir = if let Some(wd) = args.get("work_dir").and_then(|w| w.as_str()) {
-        std::path::PathBuf::from(wd)
-    } else {
-        abs_path
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .to_path_buf()
-    };
-
-    let yaml = std::fs::read_to_string(&abs_path)
-        .with_context(|| format!("failed to read graph file: {}", abs_path.display()))?;
-    let graph_def: crate::app::graph::GraphDef = serde_yaml::from_str(&yaml)
-        .with_context(|| format!("failed to parse graph YAML: {}", abs_path.display()))?;
-
-    // Parse optional vars from MCP args.
-    let inputs: Option<std::collections::HashMap<String, String>> =
-        args.get("vars").and_then(|v| v.as_object()).map(|obj| {
-            obj.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect()
-        });
-
-    info!(graph = %graph_def.graph, steps = graph_def.steps.len(), "run_graph via MCP");
-
-    let ctx = crate::app::graph::execute(&graph_def, &work_dir, None, inputs)
-        .await
-        .with_context(|| format!("graph execution failed: {}", graph_def.graph))?;
-
-    // Build a summary of results.
-    let mut summary = format!(
-        "Graph '{}' completed: {} steps executed\n",
-        graph_def.graph,
-        ctx.results.len()
-    );
-
-    for step in &graph_def.steps {
-        if let Some(result) = ctx.results.get(&step.id) {
-            let status = if result.skipped { "SKIP" } else { "DONE" };
-            summary.push_str(&format!(
-                "  [{status}] {} ({}ms)\n",
-                result.id, result.duration_ms
-            ));
-
-            // Include non-empty tool outputs (truncated).
-            for tr in &result.tool_results {
-                if !tr.stdout.is_empty() && !tr.skipped {
-                    let output = if tr.stdout.len() > 500 {
-                        format!("{}...", &tr.stdout[..500])
-                    } else {
-                        tr.stdout.clone()
-                    };
-                    summary.push_str(&format!("    {}: {}\n", tr.tool, output.trim()));
-                }
-                if !tr.stderr.is_empty() && tr.exit_code != 0 {
-                    let err_output = if tr.stderr.len() > 200 {
-                        format!("{}...", &tr.stderr[..200])
-                    } else {
-                        tr.stderr.clone()
-                    };
-                    summary.push_str(&format!("    {} stderr: {}\n", tr.tool, err_output.trim()));
-                }
-            }
-
-            // Include LLM decision output (truncated).
-            if let Some(ref llm_out) = result.llm_output {
-                let display = if llm_out.len() > 500 {
-                    format!("{}...", &llm_out[..500])
-                } else {
-                    llm_out.clone()
-                };
-                summary.push_str(&format!("    LLM: {}\n", display.trim()));
-            }
-        }
-    }
-
-    if !ctx.variables.is_empty() {
-        summary.push_str("\nVariables:\n");
-        for (k, v) in &ctx.variables {
-            let display = if v.len() > 200 {
-                format!("{}...", &v[..200])
-            } else {
-                v.clone()
-            };
-            summary.push_str(&format!("  {}: {}\n", k, display));
-        }
-    }
+    let summary = mcp_service::run_graph(file, work_dir, vars).await?;
 
     Ok(json!({
         "content": [{"type": "text", "text": summary}],
@@ -1119,61 +970,25 @@ async fn call_task_create(args: &Value, agent_name: &str) -> Result<Value> {
                 .collect()
         })
         .unwrap_or_default();
-
     let metadata = args
         .get("metadata")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
 
-    let store = crate::app::task::TaskStore::default_for_home();
-    let criteria = crate::app::task::TaskCriteria { model, labels };
-    let task = if metadata.is_null() {
-        store.create(description, criteria, agent_name)?
-    } else {
-        store.create_with_metadata(description, criteria, agent_name, metadata)?
-    };
-
-    info!(agent = %agent_name, task_id = %task.id, "task_create via MCP");
+    let result = mcp_service::task_create(description, model, labels, metadata, agent_name)?;
 
     Ok(json!({
         "content": [{"type": "text", "text": format!(
-            "Task created: {} (status=pending, id={})", task.description, task.id
+            "Task created: {} (status=pending, id={})", result.description, result.id
         )}],
         "isError": false
     }))
 }
 
 async fn call_task_list(args: &Value) -> Result<Value> {
-    let status_filter = args
-        .get("status")
-        .and_then(|s| s.as_str())
-        .and_then(|s| match s {
-            "pending" => Some(crate::app::task::TaskStatus::Pending),
-            "active" => Some(crate::app::task::TaskStatus::Active),
-            "done" => Some(crate::app::task::TaskStatus::Done),
-            "failed" => Some(crate::app::task::TaskStatus::Failed),
-            "cancelled" => Some(crate::app::task::TaskStatus::Cancelled),
-            "dead_letter" => Some(crate::app::task::TaskStatus::DeadLetter),
-            _ => None,
-        });
+    let status_filter = args.get("status").and_then(|s| s.as_str());
 
-    let store = crate::app::task::TaskStore::default_for_home();
-    let tasks = store.list(status_filter)?;
-
-    let summary: Vec<Value> = tasks
-        .iter()
-        .map(|t| {
-            json!({
-                "id": t.id,
-                "description": t.description,
-                "status": t.status.to_string(),
-                "assignee": t.assignee,
-                "created_by": t.created_by,
-                "created_at": t.created_at,
-                "sm_instance_id": t.sm_instance_id,
-            })
-        })
-        .collect();
+    let summary = mcp_service::task_list(status_filter)?;
 
     Ok(json!({
         "content": [{"type": "text", "text": serde_json::to_string_pretty(&summary)?}],
@@ -1187,13 +1002,10 @@ async fn call_task_cancel(args: &Value) -> Result<Value> {
         .and_then(|i| i.as_str())
         .context("missing id")?;
 
-    let store = crate::app::task::TaskStore::default_for_home();
-    let task = store.cancel(id)?;
-
-    info!(task_id = %task.id, "task_cancel via MCP");
+    let result = mcp_service::task_cancel(id)?;
 
     Ok(json!({
-        "content": [{"type": "text", "text": format!("Task {} cancelled", task.id)}],
+        "content": [{"type": "text", "text": format!("Task {} cancelled", result.id)}],
         "isError": false
     }))
 }
@@ -1205,36 +1017,14 @@ async fn call_list_agents(internal_bus: &Arc<Mutex<Option<InternalBus>>>) -> Res
         Some(ibus) => {
             let mut list = Vec::new();
             for name in &ibus.sub_agents {
-                let (model, turns, cost_usd) = match crate::app::agent::load_state(name) {
-                    Ok(state) => (
-                        state.config.model.clone(),
-                        state.total_turns,
-                        state.total_cost,
-                    ),
-                    Err(_) => ("unknown".to_string(), 0, 0.0),
-                };
-
-                // Determine status from the worker JoinHandle.
-                let status = ibus
+                let is_finished = ibus
                     .worker_handles
                     .iter()
                     .find(|(n, _)| n == name)
-                    .map(|(_, handle)| {
-                        if handle.is_finished() {
-                            "finished"
-                        } else {
-                            "running"
-                        }
-                    })
-                    .unwrap_or("unknown");
+                    .map(|(_, handle)| handle.is_finished())
+                    .unwrap_or(true);
 
-                list.push(json!({
-                    "name": name,
-                    "model": model,
-                    "status": status,
-                    "turns": turns,
-                    "cost_usd": cost_usd,
-                }));
+                list.push(mcp_service::build_agent_summary(name, is_finished));
             }
             list
         }
@@ -1256,55 +1046,17 @@ async fn call_remove_agent(
         .and_then(|n| n.as_str())
         .context("missing name")?;
 
-    // Verify the target agent exists and is a sub-agent of the caller.
-    let state = crate::app::agent::load_state(name)
-        .with_context(|| format!("agent '{}' not found", name))?;
+    // Validate ownership and get agent state.
+    let state = mcp_service::validate_remove_agent(name, caller)?;
 
-    match &state.parent {
-        Some(parent) if parent == caller => {}
-        _ => bail!(
-            "agent '{}' is not a sub-agent of '{}' — removal denied",
-            name,
-            caller
-        ),
-    }
-
-    // Graceful shutdown: send SIGTERM and wait for process to exit.
-    if state.pid > 0 {
-        let _ = std::process::Command::new("kill")
-            .args(["-TERM", &state.pid.to_string()])
-            .status();
-        info!(agent = %name, pid = state.pid, "sent SIGTERM, waiting for exit");
-
-        // Wait up to 30 seconds for the process to exit.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            // Check if process is still alive (kill -0).
-            let alive = std::process::Command::new("kill")
-                .args(["-0", &state.pid.to_string()])
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-            if !alive {
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                warn!(agent = %name, pid = state.pid, "process did not exit in 30s, force killing");
-                let _ = std::process::Command::new("kill")
-                    .args(["-9", &state.pid.to_string()])
-                    .status();
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        }
-    }
+    // Graceful shutdown of the agent process.
+    mcp_service::stop_agent_process(name, state.pid).await;
 
     // Clean up internal bus state.
     {
         let mut ibus_guard = internal_bus.lock().await;
         if let Some(ref mut ibus) = *ibus_guard {
             ibus.sub_agents.remove(name);
-            // Abort the worker handle.
             ibus.worker_handles.retain(|(n, handle)| {
                 if n == name {
                     handle.abort();
@@ -1343,72 +1095,21 @@ async fn call_sm_create(
         .and_then(|t| t.as_str())
         .context("missing title")?;
     let body = args.get("body").and_then(|b| b.as_str()).unwrap_or("");
-
-    let cfg = user_config.context("no user config loaded — models not available")?;
-    let model: statemachine::ModelDef = cfg
-        .models
-        .iter()
-        .find(|m| m.name == model_name)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("model '{}' not found", model_name))?
-        .into();
-
     let metadata = args
         .get("metadata")
         .cloned()
         .unwrap_or(serde_json::Value::Null);
 
-    let store = statemachine::StateMachineStore::default_for_home();
-    let mut inst = store.create(&model, title, body, agent_name)?;
-    if !metadata.is_null() {
-        inst.metadata = metadata;
-        store.save(&inst)?;
-    }
-    info!(agent = %agent_name, instance = %inst.id, model = %model_name, "sm_create via MCP");
-
-    // If the initial state has an assignee, dispatch the first task via the bus.
-    if !inst.assignee.is_empty() {
-        let task_text = format!(
-            "---\n## Task: {}\n\n{}\n\n---\n## Metadata\ninstance_id: {}\nmodel: {}\nstate: {}",
-            inst.title, inst.body, inst.id, inst.model, inst.state
-        );
-
-        let mut stream = UnixStream::connect(bus_socket)
-            .await
-            .with_context(|| format!("failed to connect to bus at {}", bus_socket))?;
-
-        let reg = serde_json::json!({
-            "type": "register",
-            "name": format!("{}-mcp-sm", agent_name),
-            "subscriptions": []
-        });
-        let mut line = serde_json::to_string(&reg)?;
-        line.push('\n');
-        stream.write_all(line.as_bytes()).await?;
-
-        let msg = serde_json::json!({
-            "type": "message",
-            "id": Uuid::new_v4().to_string(),
-            "source": "workflow-engine",
-            "target": &inst.assignee,
-            "payload": {
-                "task": task_text,
-                "sm_instance_id": inst.id,
-            },
-            "reply_to": format!("sm:{}", inst.id),
-            "metadata": {"priority": 5u8},
-        });
-        let mut msg_line = serde_json::to_string(&msg)?;
-        msg_line.push('\n');
-        stream.write_all(msg_line.as_bytes()).await?;
-        stream.flush().await?;
-        info!(instance = %inst.id, assignee = %inst.assignee, "dispatched initial task");
-    }
+    let cfg = user_config.context("no user config loaded — models not available")?;
+    let result = mcp_service::sm_create(
+        model_name, title, body, metadata, agent_name, bus_socket, cfg,
+    )
+    .await?;
 
     Ok(json!({
         "content": [{"type": "text", "text": format!(
             "Created instance {} (model={}, state={}, assignee={})",
-            inst.id, inst.model, inst.state, inst.assignee
+            result.id, result.model, result.state, result.assignee
         )}],
         "isError": false
     }))
@@ -1430,74 +1131,24 @@ async fn call_sm_move(
         .context("missing state")?;
     let note = args.get("note").and_then(|n| n.as_str());
 
-    let store = statemachine::StateMachineStore::default_for_home();
-    let mut inst = store.load(id)?;
     let cfg = user_config.context("no user config loaded — models not available")?;
-    let model: statemachine::ModelDef = cfg
-        .models
-        .iter()
-        .find(|m| m.name == inst.model)
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("model '{}' not found in config", inst.model))?
-        .into();
-
-    let from = inst.state.clone();
-    store.move_to(&mut inst, &model, state, agent_name, note, None, None)?;
-    info!(agent = %agent_name, instance = %id, from = %from, to = %state, "sm_move via MCP");
-
-    // Notify workflow engine to dispatch if the new state has an assignee.
-    if !inst.assignee.is_empty()
-        && !statemachine::is_terminal(&model, &inst)
-        && let Err(e) = crate::app::workflow::notify_moved(bus_socket, id, agent_name).await
-    {
-        warn!(agent = %agent_name, instance = %id, error = %e, "failed to notify workflow engine after sm_move");
-    }
+    let result = mcp_service::sm_move(id, state, note, agent_name, bus_socket, cfg).await?;
 
     Ok(json!({
-        "content": [{"type": "text", "text": format!("{} → {} (model={})", id, inst.state, inst.model)}],
+        "content": [{"type": "text", "text": format!("{} → {} (model={})", result.id, result.state, result.model)}],
         "isError": false
     }))
 }
 
 async fn call_sm_query(args: &Value) -> Result<Value> {
-    // If a specific ID is requested, return just that instance.
-    if let Some(id) = args.get("id").and_then(|i| i.as_str()) {
-        let store = statemachine::StateMachineStore::default_for_home();
-        let inst = store.load(id)?;
-        let dto: crate::infra::dto::StoredInstance = (&inst).into();
-        let inst_json = serde_json::to_value(&dto)?;
-        return Ok(json!({
-            "content": [{"type": "text", "text": serde_json::to_string_pretty(&inst_json)?}],
-            "isError": false
-        }));
-    }
+    let id = args.get("id").and_then(|i| i.as_str());
+    let model_filter = args.get("model").and_then(|m| m.as_str());
+    let state_filter = args.get("state").and_then(|s| s.as_str());
 
-    let store = statemachine::StateMachineStore::default_for_home();
-    let mut instances = store.list_all()?;
-
-    if let Some(model_filter) = args.get("model").and_then(|m| m.as_str()) {
-        instances.retain(|i| i.model == model_filter);
-    }
-    if let Some(state_filter) = args.get("state").and_then(|s| s.as_str()) {
-        instances.retain(|i| i.state == state_filter);
-    }
-
-    let summary: Vec<Value> = instances
-        .iter()
-        .map(|i| {
-            json!({
-                "id": i.id,
-                "model": i.model,
-                "title": i.title,
-                "state": i.state,
-                "assignee": i.assignee,
-                "updated_at": i.updated_at,
-            })
-        })
-        .collect();
+    let result = mcp_service::sm_query(id, model_filter, state_filter)?;
 
     Ok(json!({
-        "content": [{"type": "text", "text": serde_json::to_string_pretty(&summary)?}],
+        "content": [{"type": "text", "text": serde_json::to_string_pretty(&result)?}],
         "isError": false
     }))
 }

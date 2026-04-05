@@ -12,6 +12,7 @@ pub mod commands;
 pub mod context;
 pub mod graph;
 pub mod mcp;
+pub mod mcp_service;
 pub mod message;
 pub mod schedule;
 pub mod serve;
