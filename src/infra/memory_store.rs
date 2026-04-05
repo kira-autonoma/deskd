@@ -97,6 +97,9 @@ impl TaskWriter for InMemoryTaskStore {
             turns: None,
             metadata: serde_json::Value::Null,
             timed_out_at: None,
+            attempt: 0,
+            max_retries: 0,
+            retry_after: None,
         };
         let dto: StoredTask = (&task).into();
         self.tasks.lock().unwrap().insert(id, dto);
@@ -153,6 +156,7 @@ impl TaskWriter for InMemoryTaskStore {
         agent_labels: &[String],
     ) -> Result<Option<Task>> {
         let mut tasks = self.tasks.lock().unwrap();
+        let now = chrono::Utc::now();
         let mut pending: Vec<String> = tasks
             .values()
             .cloned()
@@ -160,6 +164,7 @@ impl TaskWriter for InMemoryTaskStore {
             .filter(|t| {
                 t.status == TaskStatus::Pending
                     && matches_criteria(&t.criteria, agent_model, agent_labels)
+                    && !crate::domain::task::is_retry_pending(t, &now)
             })
             .map(|t| t.id.clone())
             .collect();
@@ -211,9 +216,28 @@ impl TaskWriter for InMemoryTaskStore {
         if task.status != TaskStatus::Active {
             bail!("Cannot fail task '{}': status is '{}'", id, task.status);
         }
-        task.status = TaskStatus::Failed;
-        task.error = Some(error_msg.to_string());
-        task.updated_at = chrono::Utc::now().to_rfc3339();
+
+        let next_attempt = task.attempt + 1;
+        if next_attempt <= task.max_retries {
+            // Retry: reset to Pending with backoff.
+            task.status = TaskStatus::Pending;
+            task.attempt = next_attempt;
+            task.assignee = None;
+            task.error = Some(error_msg.to_string());
+            task.retry_after = Some(crate::domain::task::compute_retry_after(next_attempt));
+            task.updated_at = chrono::Utc::now().to_rfc3339();
+        } else if task.max_retries > 0 {
+            // Exhausted all retries — dead letter.
+            task.status = TaskStatus::DeadLetter;
+            task.error = Some(error_msg.to_string());
+            task.updated_at = chrono::Utc::now().to_rfc3339();
+        } else {
+            // No retries configured — plain failure.
+            task.status = TaskStatus::Failed;
+            task.error = Some(error_msg.to_string());
+            task.updated_at = chrono::Utc::now().to_rfc3339();
+        }
+
         tasks.insert(id.to_string(), (&task).into());
         Ok(task)
     }
@@ -444,6 +468,7 @@ mod tests {
                     timeout: None,
                     timeout_goto: None,
                     criteria: None,
+                    max_retries: 0,
                 },
                 TransitionDef {
                     from: "in_review".to_string(),
@@ -457,6 +482,7 @@ mod tests {
                     timeout: None,
                     timeout_goto: None,
                     criteria: None,
+                    max_retries: 0,
                 },
             ],
         };
@@ -489,5 +515,81 @@ mod tests {
 
         let all = store.list_all().unwrap();
         assert_eq!(all.len(), 1);
+    }
+
+    #[test]
+    fn test_retry_on_fail_resets_to_pending() {
+        let store = InMemoryTaskStore::new();
+        let mut task = store
+            .create("Retryable task", TaskCriteria::default(), "kira")
+            .unwrap();
+
+        // Set max_retries on the task (simulating SM dispatch setting it).
+        task.max_retries = 2;
+        let dto: crate::infra::dto::StoredTask = (&task).into();
+        store.tasks.lock().unwrap().insert(task.id.clone(), dto);
+
+        // Claim and fail the task — should retry (attempt 0 -> 1, max_retries=2).
+        let claimed = store.claim_next("w1", "any", &[]).unwrap().unwrap();
+        assert_eq!(claimed.id, task.id);
+
+        let failed = store.fail(&claimed.id, "transient error").unwrap();
+        assert_eq!(failed.status, TaskStatus::Pending);
+        assert_eq!(failed.attempt, 1);
+        assert!(failed.retry_after.is_some());
+        assert!(failed.assignee.is_none());
+        assert_eq!(failed.error.as_deref(), Some("transient error"));
+    }
+
+    #[test]
+    fn test_retry_exhausted_goes_to_dead_letter() {
+        let store = InMemoryTaskStore::new();
+        let mut task = store
+            .create("Retryable task", TaskCriteria::default(), "kira")
+            .unwrap();
+
+        // Set max_retries=1, attempt=1 (already retried once).
+        task.max_retries = 1;
+        task.attempt = 1;
+        let dto: crate::infra::dto::StoredTask = (&task).into();
+        store.tasks.lock().unwrap().insert(task.id.clone(), dto);
+
+        // Claim and fail — should go to DeadLetter (attempt 1+1=2 > max_retries=1).
+        let claimed = store.claim_next("w1", "any", &[]).unwrap().unwrap();
+        let result = store.fail(&claimed.id, "permanent error").unwrap();
+        assert_eq!(result.status, TaskStatus::DeadLetter);
+    }
+
+    #[test]
+    fn test_no_retry_configured_goes_to_failed() {
+        let store = InMemoryTaskStore::new();
+        let task = store
+            .create("No-retry task", TaskCriteria::default(), "kira")
+            .unwrap();
+        assert_eq!(task.max_retries, 0);
+
+        let claimed = store.claim_next("w1", "any", &[]).unwrap().unwrap();
+        let result = store.fail(&claimed.id, "error").unwrap();
+        assert_eq!(result.status, TaskStatus::Failed);
+    }
+
+    #[test]
+    fn test_claim_next_skips_retry_pending_tasks() {
+        let store = InMemoryTaskStore::new();
+        let mut task = store
+            .create("Retry-pending task", TaskCriteria::default(), "kira")
+            .unwrap();
+
+        // Set retry_after to 1 hour in the future.
+        let future = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        task.retry_after = Some(future);
+        task.attempt = 1;
+        task.max_retries = 3;
+        let dto: crate::infra::dto::StoredTask = (&task).into();
+        store.tasks.lock().unwrap().insert(task.id.clone(), dto);
+
+        // claim_next should return None (task is pending but retry_after is in future).
+        let claimed = store.claim_next("w1", "any", &[]).unwrap();
+        assert!(claimed.is_none());
     }
 }

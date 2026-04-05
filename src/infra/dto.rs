@@ -126,6 +126,12 @@ pub struct StoredTask {
     pub metadata: serde_json::Value,
     #[serde(default)]
     pub timed_out_at: Option<String>,
+    #[serde(default)]
+    pub attempt: u32,
+    #[serde(default)]
+    pub max_retries: u32,
+    #[serde(default)]
+    pub retry_after: Option<String>,
 }
 
 /// Storage format for task matching criteria.
@@ -171,6 +177,9 @@ impl From<StoredTask> for Task {
             turns: dto.turns,
             metadata: dto.metadata,
             timed_out_at: dto.timed_out_at,
+            attempt: dto.attempt,
+            max_retries: dto.max_retries,
+            retry_after: dto.retry_after,
         }
     }
 }
@@ -204,6 +213,9 @@ impl From<&Task> for StoredTask {
             turns: task.turns,
             metadata: task.metadata.clone(),
             timed_out_at: task.timed_out_at.clone(),
+            attempt: task.attempt,
+            max_retries: task.max_retries,
+            retry_after: task.retry_after.clone(),
         }
     }
 }
@@ -423,6 +435,8 @@ pub struct ConfigTransitionDef {
     pub timeout_goto: Option<String>,
     #[serde(default)]
     pub criteria: Option<ConfigTaskCriteria>,
+    #[serde(default)]
+    pub max_retries: u32,
 }
 
 /// Config-level task criteria (serde for YAML parsing).
@@ -474,6 +488,7 @@ impl From<ConfigTransitionDef> for TransitionDef {
             timeout: dto.timeout,
             timeout_goto: dto.timeout_goto,
             criteria: dto.criteria.map(Into::into),
+            max_retries: dto.max_retries,
         }
     }
 }
@@ -492,6 +507,7 @@ impl From<&TransitionDef> for ConfigTransitionDef {
             timeout: t.timeout.clone(),
             timeout_goto: t.timeout_goto.clone(),
             criteria: t.criteria.as_ref().map(Into::into),
+            max_retries: t.max_retries,
         }
     }
 }
@@ -793,6 +809,9 @@ mod tests {
             turns: None,
             metadata: serde_json::Value::Null,
             timed_out_at: None,
+            attempt: 0,
+            max_retries: 0,
+            retry_after: None,
         };
         let stored: StoredTask = (&task).into();
         assert_eq!(stored.status, "active");

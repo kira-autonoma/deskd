@@ -46,6 +46,11 @@ impl TaskStore {
         Ok(())
     }
 
+    /// Public save — used by workflow engine to update task fields after creation.
+    pub fn save_pub(&self, task: &Task) -> Result<()> {
+        self.save(task)
+    }
+
     pub fn load(&self, id: &str) -> Result<Task> {
         let path = self.task_path(id);
         let content =
@@ -125,6 +130,9 @@ impl TaskStore {
             turns: None,
             metadata,
             timed_out_at: None,
+            attempt: 0,
+            max_retries: 0,
+            retry_after: None,
         };
 
         self.save(&task)?;
@@ -187,6 +195,7 @@ impl TaskStore {
             return Ok(None);
         }
 
+        let now = chrono::Utc::now();
         let mut pending: Vec<Task> = Vec::new();
         for entry in std::fs::read_dir(&self.dir)? {
             let entry = entry?;
@@ -196,7 +205,9 @@ impl TaskStore {
                 && let Ok(dto) = serde_json::from_str::<StoredTask>(&content)
             {
                 let task: Task = dto.into();
-                if task.status == TaskStatus::Pending {
+                if task.status == TaskStatus::Pending
+                    && !crate::domain::task::is_retry_pending(&task, &now)
+                {
                     pending.push(task);
                 }
             }
@@ -256,7 +267,11 @@ impl TaskStore {
         Ok(task)
     }
 
-    /// Mark a task as failed.
+    /// Mark a task as failed, or retry if attempts remain.
+    ///
+    /// If `attempt < max_retries`, resets to Pending with incremented attempt
+    /// counter and exponential backoff. If retries are exhausted, moves to
+    /// DeadLetter. If no retries configured, moves to Failed.
     pub fn fail(&self, id: &str, error_msg: &str) -> Result<Task> {
         let mut task = self.load(id)?;
         if task.status != TaskStatus::Active {
@@ -266,9 +281,28 @@ impl TaskStore {
                 task.status
             );
         }
-        task.status = TaskStatus::Failed;
-        task.error = Some(error_msg.to_string());
-        task.updated_at = Utc::now().to_rfc3339();
+
+        let next_attempt = task.attempt + 1;
+        if next_attempt <= task.max_retries {
+            // Retry: reset to Pending with backoff.
+            task.status = TaskStatus::Pending;
+            task.attempt = next_attempt;
+            task.assignee = None;
+            task.error = Some(error_msg.to_string());
+            task.retry_after = Some(crate::domain::task::compute_retry_after(next_attempt));
+            task.updated_at = Utc::now().to_rfc3339();
+        } else if task.max_retries > 0 {
+            // Exhausted all retries — dead letter.
+            task.status = TaskStatus::DeadLetter;
+            task.error = Some(error_msg.to_string());
+            task.updated_at = Utc::now().to_rfc3339();
+        } else {
+            // No retries configured — plain failure.
+            task.status = TaskStatus::Failed;
+            task.error = Some(error_msg.to_string());
+            task.updated_at = Utc::now().to_rfc3339();
+        }
+
         self.save(&task)?;
         Ok(task)
     }

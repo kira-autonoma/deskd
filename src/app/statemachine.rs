@@ -306,6 +306,7 @@ mod tests {
                     timeout: None,
                     timeout_goto: None,
                     criteria: None,
+                    max_retries: 0,
                 },
                 TransitionDef {
                     from: "in_review".into(),
@@ -319,6 +320,7 @@ mod tests {
                     timeout: None,
                     timeout_goto: None,
                     criteria: None,
+                    max_retries: 0,
                 },
                 TransitionDef {
                     from: "in_review".into(),
@@ -332,6 +334,7 @@ mod tests {
                     timeout: None,
                     timeout_goto: None,
                     criteria: None,
+                    max_retries: 0,
                 },
                 TransitionDef {
                     from: "*".into(),
@@ -345,6 +348,7 @@ mod tests {
                     timeout: None,
                     timeout_goto: None,
                     criteria: None,
+                    max_retries: 0,
                 },
             ],
         }

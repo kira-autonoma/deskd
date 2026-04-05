@@ -30,6 +30,8 @@ pub struct TransitionDef {
     /// Task queue criteria for this transition (model, labels).
     /// When set, dispatch creates a task in the queue instead of direct bus message.
     pub criteria: Option<crate::domain::task::TaskCriteria>,
+    /// Maximum number of retries for tasks dispatched by this transition (default 0).
+    pub max_retries: u32,
 }
 
 /// An instance of a state machine model.

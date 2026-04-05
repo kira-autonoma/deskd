@@ -93,6 +93,7 @@ fn test_model() -> deskd::config::ModelDef {
                 timeout: None,
                 timeout_goto: None,
                 criteria: None,
+                max_retries: 0,
             },
             deskd::config::TransitionDef {
                 from: "review".into(),
@@ -106,6 +107,7 @@ fn test_model() -> deskd::config::ModelDef {
                 timeout: None,
                 timeout_goto: None,
                 criteria: None,
+                max_retries: 0,
             },
             deskd::config::TransitionDef {
                 from: "review".into(),
@@ -119,6 +121,7 @@ fn test_model() -> deskd::config::ModelDef {
                 timeout: None,
                 timeout_goto: None,
                 criteria: None,
+                max_retries: 0,
             },
         ],
     }
