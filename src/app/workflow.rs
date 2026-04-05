@@ -7,7 +7,8 @@ use uuid::Uuid;
 use crate::app::message::Message;
 use crate::app::statemachine;
 use crate::app::worker;
-use crate::domain::statemachine::ModelDef;
+use crate::domain::statemachine::{ModelDef, StepType};
+use crate::domain::workitem::WorkItem;
 
 type Writer = std::sync::Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>;
 
@@ -220,17 +221,12 @@ fn find_next_state(model: &ModelDef, current_state: &str, result: &str) -> Optio
     None
 }
 
-/// Dispatch a task to the instance's current assignee.
-async fn dispatch_instance(
-    writer: &Writer,
-    model: &ModelDef,
-    inst: &statemachine::Instance,
-) -> Result<()> {
-    if inst.assignee.is_empty() {
-        debug!(instance = %inst.id, state = %inst.state, "no assignee, skipping dispatch");
-        return Ok(());
-    }
-
+/// Build a WorkItem from a model and instance.
+///
+/// Extracts the transition definition for the current state, determines
+/// step type, builds task text, and populates all fields. This is the
+/// single creation path — all transitions go through here.
+fn build_work_item(model: &ModelDef, inst: &statemachine::Instance) -> WorkItem {
     // Find the prompt for the transition that leads to the current state.
     let prompt = inst
         .history
@@ -246,81 +242,117 @@ async fn dispatch_instance(
         .unwrap_or_default();
 
     let transition_def = model.transitions.iter().find(|t| t.to == inst.state);
+
     let step_type = transition_def
         .map(|t| &t.step_type)
         .cloned()
         .unwrap_or_default();
 
-    use crate::domain::statemachine::StepType;
-    match step_type {
+    let task_text = build_task_text(&prompt, inst);
+
+    WorkItem {
+        instance_id: inst.id.clone(),
+        step_type,
+        assignee: inst.assignee.clone(),
+        task_text,
+        prompt,
+        command: transition_def.and_then(|t| t.command.clone()),
+        notify: transition_def.and_then(|t| t.notify.clone()),
+        criteria: transition_def.and_then(|t| t.criteria.clone()),
+        timeout: transition_def.and_then(|t| t.timeout.clone()),
+        timeout_goto: transition_def.and_then(|t| t.timeout_goto.clone()),
+        max_retries: transition_def.map(|t| t.max_retries).unwrap_or(0),
+    }
+}
+
+/// Dispatch a WorkItem to the appropriate execution path.
+///
+/// Routes based on step_type and criteria:
+/// - Human → notification to notify target
+/// - Check → shell command execution
+/// - Validate → lightweight LLM review (TODO #249)
+/// - Agent + criteria → task queue (pull-based)
+/// - Agent + no criteria → direct bus message (push-based)
+async fn dispatch_work_item(
+    writer: &Writer,
+    model: &ModelDef,
+    inst: &statemachine::Instance,
+    work_item: &WorkItem,
+) -> Result<()> {
+    match work_item.step_type {
         StepType::Human => {
-            // Send notification instead of dispatching to agent.
-            if let Some(notify_target) = transition_def.and_then(|t| t.notify.as_ref()) {
-                let task_text = build_task_text(&prompt, inst);
+            if let Some(ref notify_target) = work_item.notify {
                 let msg = serde_json::json!({
                     "type": "message",
                     "id": Uuid::new_v4().to_string(),
                     "source": "workflow-engine",
                     "target": notify_target,
                     "payload": {
-                        "task": task_text,
-                        "sm_instance_id": inst.id,
+                        "task": work_item.task_text,
+                        "sm_instance_id": work_item.instance_id,
                     },
-                    "reply_to": format!("sm:{}", inst.id),
+                    "reply_to": format!("sm:{}", work_item.instance_id),
                     "metadata": {"priority": 5u8},
                 });
                 let mut line = serde_json::to_string(&msg)?;
                 line.push('\n');
                 let mut w = writer.lock().await;
                 w.write_all(line.as_bytes()).await?;
-                info!(instance = %inst.id, target = %notify_target, "human notification sent");
+                info!(instance = %work_item.instance_id, target = %notify_target, "human notification sent");
             }
-            return Ok(());
+            Ok(())
         }
         StepType::Check => {
-            return dispatch_check_step(writer, model, inst, transition_def).await;
+            let transition_def = model.transitions.iter().find(|t| t.to == inst.state);
+            dispatch_check_step(writer, model, inst, transition_def).await
         }
         StepType::Validate => {
             // TODO: implement in #249 — for now, fall through to agent dispatch
+            dispatch_agent(writer, inst, work_item).await
         }
-        StepType::Agent => {}
+        StepType::Agent => dispatch_agent(writer, inst, work_item).await,
     }
+}
 
-    // Build task text with prompt injection.
-    let task_text = build_task_text(&prompt, inst);
-
-    // Check if the transition has task queue criteria — dispatch via queue if so.
-    let transition_criteria = transition_def.and_then(|t| t.criteria.clone());
-
-    if let Some(criteria) = transition_criteria {
+/// Dispatch an agent step — either via task queue (criteria) or direct bus message.
+async fn dispatch_agent(
+    writer: &Writer,
+    inst: &statemachine::Instance,
+    work_item: &WorkItem,
+) -> Result<()> {
+    if let Some(ref criteria) = work_item.criteria {
         // Dispatch via task queue (pull-based).
         let store = crate::app::task::TaskStore::default_for_home();
-        let max_retries = transition_def.map(|t| t.max_retries).unwrap_or(0);
-        let mut task = store.create_for_sm(&task_text, criteria, "workflow-engine", &inst.id)?;
-        if max_retries > 0 {
-            task.max_retries = max_retries;
+        let mut task = store.create_for_sm(
+            &work_item.task_text,
+            criteria.clone(),
+            "workflow-engine",
+            &work_item.instance_id,
+        )?;
+        if work_item.max_retries > 0 {
+            task.max_retries = work_item.max_retries;
             store.save_pub(&task)?;
         }
         info!(
-            instance = %inst.id,
+            instance = %work_item.instance_id,
             task_id = %task.id,
-            max_retries = max_retries,
+            max_retries = work_item.max_retries,
             "task created in queue for SM dispatch"
         );
         return Ok(());
     }
 
-    // Fallback: direct bus message dispatch (no criteria = legacy behavior).
+    // Direct bus message dispatch (no criteria).
     let msg = serde_json::json!({
         "type": "message",
         "id": Uuid::new_v4().to_string(),
         "source": "workflow-engine",
         "target": &inst.assignee,
         "payload": {
-            "task": task_text,
-            "sm_instance_id": inst.id,
+            "task": work_item.task_text,
+            "sm_instance_id": work_item.instance_id,
         },
-        "reply_to": format!("sm:{}", inst.id),
+        "reply_to": format!("sm:{}", work_item.instance_id),
         "metadata": {"priority": 5u8},
     });
 
@@ -329,8 +361,30 @@ async fn dispatch_instance(
     let mut w = writer.lock().await;
     w.write_all(line.as_bytes()).await?;
 
-    info!(instance = %inst.id, assignee = %inst.assignee, "task dispatched via bus");
+    info!(instance = %work_item.instance_id, assignee = %inst.assignee, "task dispatched via bus");
     Ok(())
+}
+
+/// Dispatch a task to the instance's current assignee.
+///
+/// Creates a WorkItem and routes it to the appropriate execution path.
+async fn dispatch_instance(
+    writer: &Writer,
+    model: &ModelDef,
+    inst: &statemachine::Instance,
+) -> Result<()> {
+    if inst.assignee.is_empty() {
+        debug!(instance = %inst.id, state = %inst.state, "no assignee, skipping dispatch");
+        return Ok(());
+    }
+
+    let work_item = build_work_item(model, inst);
+    info!(
+        instance = %inst.id,
+        step_type = %work_item.step_type,
+        "work item created"
+    );
+    dispatch_work_item(writer, model, inst, &work_item).await
 }
 
 /// Build the full task text with prompt and context.
@@ -949,5 +1003,172 @@ mod tests {
             Some("test -f /tmp/output.txt")
         );
         assert_eq!(check_transition.step_type, StepType::Check);
+    }
+
+    fn make_instance(state: &str, assignee: &str, from: &str) -> statemachine::Instance {
+        statemachine::Instance {
+            id: "sm-wi-test".into(),
+            model: "pipeline".into(),
+            title: "Test task".into(),
+            body: "Task body".into(),
+            state: state.into(),
+            assignee: assignee.into(),
+            result: None,
+            error: None,
+            created_by: "kira".into(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            history: vec![statemachine::Transition {
+                from: from.into(),
+                to: state.into(),
+                trigger: "auto".into(),
+                timestamp: String::new(),
+                note: None,
+                cost_usd: None,
+                turns: None,
+            }],
+            metadata: serde_json::Value::Null,
+            total_cost: 0.0,
+            total_turns: 0,
+        }
+    }
+
+    #[test]
+    fn test_build_work_item_agent_without_criteria() {
+        let model = test_model();
+        let inst = make_instance("review", "agent:reviewer", "draft");
+
+        let wi = build_work_item(&model, &inst);
+        assert_eq!(wi.step_type, StepType::Agent);
+        assert_eq!(wi.assignee, "agent:reviewer");
+        assert!(wi.criteria.is_none());
+        assert!(wi.task_text.contains("Review this."));
+        assert!(wi.task_text.contains("Test task"));
+        assert_eq!(wi.prompt, "Review this.");
+        assert_eq!(wi.instance_id, "sm-wi-test");
+    }
+
+    #[test]
+    fn test_build_work_item_agent_with_criteria() {
+        let model = queue_dispatch_model();
+        let inst = make_instance("planning", "agent:planner", "backlog");
+
+        let wi = build_work_item(&model, &inst);
+        assert_eq!(wi.step_type, StepType::Agent);
+        assert!(wi.criteria.is_some());
+        let criteria = wi.criteria.unwrap();
+        assert_eq!(criteria.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(criteria.labels, vec!["planning"]);
+        assert_eq!(wi.max_retries, 0);
+    }
+
+    #[test]
+    fn test_build_work_item_check() {
+        let model = ModelDef {
+            name: "pipeline".into(),
+            description: String::new(),
+            states: vec!["start".into(), "checked".into(), "done".into()],
+            initial: "start".into(),
+            terminal: vec!["done".into()],
+            transitions: vec![
+                TransitionDef {
+                    from: "start".into(),
+                    to: "checked".into(),
+                    trigger: Some("auto".into()),
+                    on: None,
+                    assignee: Some("workflow-engine".into()),
+                    prompt: None,
+                    step_type: StepType::Check,
+                    command: Some("cargo test".into()),
+                    notify: None,
+                    timeout: None,
+                    timeout_goto: None,
+                    criteria: None,
+                    max_retries: 0,
+                },
+                TransitionDef {
+                    from: "checked".into(),
+                    to: "done".into(),
+                    trigger: Some("auto".into()),
+                    on: None,
+                    assignee: None,
+                    prompt: None,
+                    step_type: StepType::default(),
+                    command: None,
+                    notify: None,
+                    timeout: None,
+                    timeout_goto: None,
+                    criteria: None,
+                    max_retries: 0,
+                },
+            ],
+        };
+        let inst = make_instance("checked", "workflow-engine", "start");
+
+        let wi = build_work_item(&model, &inst);
+        assert_eq!(wi.step_type, StepType::Check);
+        assert_eq!(wi.command.as_deref(), Some("cargo test"));
+    }
+
+    #[test]
+    fn test_build_work_item_human() {
+        let model = ModelDef {
+            name: "pipeline".into(),
+            description: String::new(),
+            states: vec!["start".into(), "awaiting".into(), "done".into()],
+            initial: "start".into(),
+            terminal: vec!["done".into()],
+            transitions: vec![
+                TransitionDef {
+                    from: "start".into(),
+                    to: "awaiting".into(),
+                    trigger: Some("auto".into()),
+                    on: None,
+                    assignee: Some("human".into()),
+                    prompt: Some("Please review this manually.".into()),
+                    step_type: StepType::Human,
+                    command: None,
+                    notify: Some("telegram.out:-1234".into()),
+                    timeout: Some("24h".into()),
+                    timeout_goto: Some("done".into()),
+                    criteria: None,
+                    max_retries: 0,
+                },
+                TransitionDef {
+                    from: "awaiting".into(),
+                    to: "done".into(),
+                    trigger: Some("auto".into()),
+                    on: None,
+                    assignee: None,
+                    prompt: None,
+                    step_type: StepType::default(),
+                    command: None,
+                    notify: None,
+                    timeout: None,
+                    timeout_goto: None,
+                    criteria: None,
+                    max_retries: 0,
+                },
+            ],
+        };
+        let inst = make_instance("awaiting", "human", "start");
+
+        let wi = build_work_item(&model, &inst);
+        assert_eq!(wi.step_type, StepType::Human);
+        assert_eq!(wi.notify.as_deref(), Some("telegram.out:-1234"));
+        assert_eq!(wi.timeout.as_deref(), Some("24h"));
+        assert_eq!(wi.timeout_goto.as_deref(), Some("done"));
+        assert!(wi.task_text.contains("Please review this manually."));
+    }
+
+    #[test]
+    fn test_build_work_item_with_retry() {
+        let mut model = queue_dispatch_model();
+        // Set max_retries on the planning transition.
+        model.transitions[0].max_retries = 3;
+        let inst = make_instance("planning", "agent:planner", "backlog");
+
+        let wi = build_work_item(&model, &inst);
+        assert_eq!(wi.max_retries, 3);
     }
 }

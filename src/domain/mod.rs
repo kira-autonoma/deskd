@@ -8,3 +8,4 @@ pub mod context;
 pub mod message;
 pub mod statemachine;
 pub mod task;
+pub mod workitem;
