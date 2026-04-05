@@ -245,35 +245,45 @@ async fn dispatch_instance(
         .cloned()
         .unwrap_or_default();
 
-    // Check if this is a human step.
     let transition_def = model.transitions.iter().find(|t| t.to == inst.state);
-    let is_human = transition_def
-        .map(|t| t.step_type == crate::domain::statemachine::StepType::Human)
-        == Some(true);
+    let step_type = transition_def
+        .map(|t| &t.step_type)
+        .cloned()
+        .unwrap_or_default();
 
-    if is_human {
-        // Send notification instead of dispatching to agent.
-        if let Some(notify_target) = transition_def.and_then(|t| t.notify.as_ref()) {
-            let task_text = build_task_text(&prompt, inst);
-            let msg = serde_json::json!({
-                "type": "message",
-                "id": Uuid::new_v4().to_string(),
-                "source": "workflow-engine",
-                "target": notify_target,
-                "payload": {
-                    "task": task_text,
-                    "sm_instance_id": inst.id,
-                },
-                "reply_to": format!("sm:{}", inst.id),
-                "metadata": {"priority": 5u8},
-            });
-            let mut line = serde_json::to_string(&msg)?;
-            line.push('\n');
-            let mut w = writer.lock().await;
-            w.write_all(line.as_bytes()).await?;
-            info!(instance = %inst.id, target = %notify_target, "human notification sent");
+    use crate::domain::statemachine::StepType;
+    match step_type {
+        StepType::Human => {
+            // Send notification instead of dispatching to agent.
+            if let Some(notify_target) = transition_def.and_then(|t| t.notify.as_ref()) {
+                let task_text = build_task_text(&prompt, inst);
+                let msg = serde_json::json!({
+                    "type": "message",
+                    "id": Uuid::new_v4().to_string(),
+                    "source": "workflow-engine",
+                    "target": notify_target,
+                    "payload": {
+                        "task": task_text,
+                        "sm_instance_id": inst.id,
+                    },
+                    "reply_to": format!("sm:{}", inst.id),
+                    "metadata": {"priority": 5u8},
+                });
+                let mut line = serde_json::to_string(&msg)?;
+                line.push('\n');
+                let mut w = writer.lock().await;
+                w.write_all(line.as_bytes()).await?;
+                info!(instance = %inst.id, target = %notify_target, "human notification sent");
+            }
+            return Ok(());
         }
-        return Ok(());
+        StepType::Check => {
+            return dispatch_check_step(writer, model, inst, transition_def).await;
+        }
+        StepType::Validate => {
+            // TODO: implement in #249 — for now, fall through to agent dispatch
+        }
+        StepType::Agent => {}
     }
 
     // Build task text with prompt injection.
@@ -351,6 +361,77 @@ fn build_task_text(prompt: &str, inst: &statemachine::Instance) -> String {
     parts.push(meta_lines);
 
     parts.join("\n\n")
+}
+
+/// Execute a check step: run a shell command and use the result to trigger
+/// the next transition. Exit 0 = pass (result is stdout), non-zero = fail.
+async fn dispatch_check_step(
+    writer: &Writer,
+    model: &ModelDef,
+    inst: &statemachine::Instance,
+    transition_def: Option<&crate::domain::statemachine::TransitionDef>,
+) -> Result<()> {
+    let command = match transition_def.and_then(|t| t.command.as_deref()) {
+        Some(cmd) => cmd,
+        None => {
+            warn!(
+                instance = %inst.id,
+                state = %inst.state,
+                "check step has no command, skipping"
+            );
+            return Ok(());
+        }
+    };
+
+    info!(instance = %inst.id, command = %command, "executing check step");
+
+    let output = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .output()
+        .await?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let exit_code = output.status.code().unwrap_or(-1);
+
+    let (result, error) = if output.status.success() {
+        info!(
+            instance = %inst.id,
+            exit_code = exit_code,
+            "check step passed"
+        );
+        (stdout, None)
+    } else {
+        warn!(
+            instance = %inst.id,
+            exit_code = exit_code,
+            stderr = %stderr,
+            "check step failed"
+        );
+        let combined = format!("exit code {exit_code}\nstdout: {stdout}\nstderr: {stderr}");
+        (
+            combined,
+            Some(format!("check failed: exit code {exit_code}")),
+        )
+    };
+
+    // Process the check result through handle_completion, which applies
+    // the transition and dispatches the next step. Box::pin to break
+    // the async recursion cycle: handle_completion → dispatch_instance →
+    // dispatch_check_step → handle_completion.
+    let store = statemachine::StateMachineStore::default_for_home();
+    let _ = Box::pin(handle_completion(
+        writer,
+        std::slice::from_ref(model),
+        &store,
+        &inst.id,
+        &result,
+        error.as_deref(),
+    ))
+    .await;
+
+    Ok(())
 }
 
 /// On startup, find non-terminal instances and dispatch them.
@@ -454,6 +535,7 @@ mod tests {
                     assignee: Some("agent:reviewer".into()),
                     prompt: Some("Review this.".into()),
                     step_type: StepType::default(),
+                    command: None,
                     notify: None,
                     timeout: None,
                     timeout_goto: None,
@@ -468,6 +550,7 @@ mod tests {
                     assignee: None,
                     prompt: None,
                     step_type: StepType::default(),
+                    command: None,
                     notify: None,
                     timeout: None,
                     timeout_goto: None,
@@ -482,6 +565,7 @@ mod tests {
                     assignee: None,
                     prompt: None,
                     step_type: StepType::default(),
+                    command: None,
                     notify: None,
                     timeout: None,
                     timeout_goto: None,
@@ -551,6 +635,7 @@ mod tests {
                     assignee: None,
                     prompt: None,
                     step_type: StepType::default(),
+                    command: None,
                     notify: None,
                     timeout: None,
                     timeout_goto: None,
@@ -565,6 +650,7 @@ mod tests {
                     assignee: None,
                     prompt: None,
                     step_type: StepType::default(),
+                    command: None,
                     notify: None,
                     timeout: None,
                     timeout_goto: None,
@@ -652,6 +738,7 @@ mod tests {
                     assignee: Some("agent:planner".into()),
                     prompt: Some("Create a plan.".into()),
                     step_type: StepType::default(),
+                    command: None,
                     notify: None,
                     timeout: None,
                     timeout_goto: None,
@@ -669,6 +756,7 @@ mod tests {
                     assignee: Some("agent:dev".into()),
                     prompt: Some("Implement the plan.".into()),
                     step_type: StepType::default(),
+                    command: None,
                     notify: None,
                     timeout: None,
                     timeout_goto: None,
@@ -686,6 +774,7 @@ mod tests {
                     assignee: None,
                     prompt: None,
                     step_type: StepType::default(),
+                    command: None,
                     notify: None,
                     timeout: None,
                     timeout_goto: None,
@@ -806,5 +895,59 @@ mod tests {
         let model = test_model();
         let transition = model.transitions.iter().find(|t| t.to == "review").unwrap();
         assert!(transition.criteria.is_none());
+    }
+
+    #[test]
+    fn test_check_step_model_construction() {
+        // Verify that a model with check step type and command can be constructed.
+        let model = ModelDef {
+            name: "verify".into(),
+            description: "Verification pipeline".into(),
+            states: vec!["start".into(), "checked".into(), "done".into()],
+            initial: "start".into(),
+            terminal: vec!["done".into()],
+            transitions: vec![
+                TransitionDef {
+                    from: "start".into(),
+                    to: "checked".into(),
+                    trigger: Some("auto".into()),
+                    on: None,
+                    assignee: Some("workflow-engine".into()),
+                    prompt: None,
+                    step_type: StepType::Check,
+                    command: Some("test -f /tmp/output.txt".into()),
+                    notify: None,
+                    timeout: None,
+                    timeout_goto: None,
+                    criteria: None,
+                    max_retries: 0,
+                },
+                TransitionDef {
+                    from: "checked".into(),
+                    to: "done".into(),
+                    trigger: Some("auto".into()),
+                    on: None,
+                    assignee: None,
+                    prompt: None,
+                    step_type: StepType::default(),
+                    command: None,
+                    notify: None,
+                    timeout: None,
+                    timeout_goto: None,
+                    criteria: None,
+                    max_retries: 0,
+                },
+            ],
+        };
+        let check_transition = model
+            .transitions
+            .iter()
+            .find(|t| t.step_type == StepType::Check)
+            .unwrap();
+        assert_eq!(
+            check_transition.command.as_deref(),
+            Some("test -f /tmp/output.txt")
+        );
+        assert_eq!(check_transition.step_type, StepType::Check);
     }
 }

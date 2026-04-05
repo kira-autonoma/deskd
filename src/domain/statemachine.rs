@@ -66,6 +66,8 @@ pub struct TransitionDef {
     pub assignee: Option<String>,
     pub prompt: Option<String>,
     pub step_type: StepType,
+    /// Shell command to execute for `Check` steps.
+    pub command: Option<String>,
     pub notify: Option<String>,
     pub timeout: Option<String>,
     pub timeout_goto: Option<String>,

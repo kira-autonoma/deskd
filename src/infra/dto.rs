@@ -428,6 +428,8 @@ pub struct ConfigTransitionDef {
     #[serde(rename = "type", default)]
     pub step_type: Option<String>,
     #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
     pub notify: Option<String>,
     #[serde(default)]
     pub timeout: Option<String>,
@@ -495,6 +497,7 @@ impl TryFrom<ConfigTransitionDef> for TransitionDef {
             assignee: dto.assignee,
             prompt: dto.prompt,
             step_type,
+            command: dto.command,
             notify: dto.notify,
             timeout: dto.timeout,
             timeout_goto: dto.timeout_goto,
@@ -520,6 +523,7 @@ impl From<&TransitionDef> for ConfigTransitionDef {
             assignee: t.assignee.clone(),
             prompt: t.prompt.clone(),
             step_type,
+            command: t.command.clone(),
             notify: t.notify.clone(),
             timeout: t.timeout.clone(),
             timeout_goto: t.timeout_goto.clone(),
@@ -886,6 +890,7 @@ mod tests {
             assignee: None,
             prompt: None,
             step_type: Some("chekc".into()),
+            command: None,
             notify: None,
             timeout: None,
             timeout_goto: None,
@@ -911,6 +916,7 @@ mod tests {
                 assignee: None,
                 prompt: None,
                 step_type: Some(input.into()),
+                command: None,
                 notify: None,
                 timeout: None,
                 timeout_goto: None,
@@ -932,6 +938,7 @@ mod tests {
             assignee: None,
             prompt: None,
             step_type: None,
+            command: None,
             notify: None,
             timeout: None,
             timeout_goto: None,
