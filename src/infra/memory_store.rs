@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use crate::domain::statemachine::{Instance, ModelDef, Transition};
 use crate::domain::task::{QueueSummary, Task, TaskCriteria, TaskStatus, matches_criteria};
 use crate::infra::dto::{StoredInstance, StoredTask};
-use crate::ports::store::{StateMachineRepository, TaskReader, TaskWriter};
+use crate::ports::store::{StateMachineReader, StateMachineWriter, TaskReader, TaskWriter};
 
 // ─── InMemoryTaskStore ───────────────────────────────────────────────────────
 
@@ -240,13 +240,7 @@ impl Default for InMemoryStateMachineStore {
     }
 }
 
-impl StateMachineRepository for InMemoryStateMachineStore {
-    fn save(&self, inst: &Instance) -> Result<()> {
-        let dto: StoredInstance = inst.into();
-        self.instances.lock().unwrap().insert(inst.id.clone(), dto);
-        Ok(())
-    }
-
+impl StateMachineReader for InMemoryStateMachineStore {
     fn load(&self, id: &str) -> Result<Instance> {
         self.instances
             .lock()
@@ -262,6 +256,14 @@ impl StateMachineRepository for InMemoryStateMachineStore {
         let mut result: Vec<Instance> = instances.values().cloned().map(Into::into).collect();
         result.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
         Ok(result)
+    }
+}
+
+impl StateMachineWriter for InMemoryStateMachineStore {
+    fn save(&self, inst: &Instance) -> Result<()> {
+        let dto: StoredInstance = inst.into();
+        self.instances.lock().unwrap().insert(inst.id.clone(), dto);
+        Ok(())
     }
 
     fn delete(&self, id: &str) -> Result<()> {

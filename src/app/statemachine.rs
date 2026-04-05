@@ -232,15 +232,18 @@ pub fn is_terminal(model: &ModelDef, inst: &Instance) -> bool {
     model.terminal.contains(&inst.state)
 }
 
-impl crate::ports::store::StateMachineRepository for StateMachineStore {
-    fn save(&self, inst: &Instance) -> Result<()> {
-        self.save(inst)
-    }
+impl crate::ports::store::StateMachineReader for StateMachineStore {
     fn load(&self, id: &str) -> Result<Instance> {
         self.load(id)
     }
     fn list_all(&self) -> Result<Vec<Instance>> {
         self.list_all()
+    }
+}
+
+impl crate::ports::store::StateMachineWriter for StateMachineStore {
+    fn save(&self, inst: &Instance) -> Result<()> {
+        self.save(inst)
     }
     fn delete(&self, id: &str) -> Result<()> {
         self.delete(id)

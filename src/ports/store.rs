@@ -68,11 +68,15 @@ pub trait TaskRepository: TaskReader + TaskWriter {}
 /// satisfies `TaskRepository`.
 impl<T: TaskReader + TaskWriter> TaskRepository for T {}
 
-/// Persistence operations for state machine instances.
-pub trait StateMachineRepository: Send + Sync {
-    fn save(&self, inst: &Instance) -> Result<()>;
+/// Read-only persistence operations for state machine instances.
+pub trait StateMachineReader: Send + Sync {
     fn load(&self, id: &str) -> Result<Instance>;
     fn list_all(&self) -> Result<Vec<Instance>>;
+}
+
+/// Write/mutate persistence operations for state machine instances.
+pub trait StateMachineWriter: Send + Sync {
+    fn save(&self, inst: &Instance) -> Result<()>;
     fn delete(&self, id: &str) -> Result<()>;
     fn create(
         &self,
@@ -93,3 +97,9 @@ pub trait StateMachineRepository: Send + Sync {
         turns: Option<u32>,
     ) -> Result<()>;
 }
+
+/// Combined supertrait alias for backward compatibility — blanket-implemented
+/// for any type that implements both `StateMachineReader` and `StateMachineWriter`.
+pub trait StateMachineRepository: StateMachineReader + StateMachineWriter {}
+
+impl<T: StateMachineReader + StateMachineWriter> StateMachineRepository for T {}
