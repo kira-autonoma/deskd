@@ -306,10 +306,7 @@ async fn dispatch_work_item(
             let transition_def = model.transitions.iter().find(|t| t.to == inst.state);
             dispatch_check_step(writer, model, inst, transition_def).await
         }
-        StepType::Validate => {
-            // TODO: implement in #249 — for now, fall through to agent dispatch
-            dispatch_agent(writer, inst, work_item).await
-        }
+        StepType::Validate => dispatch_validate_step(writer, model, inst, work_item).await,
         StepType::Agent => dispatch_agent(writer, inst, work_item).await,
     }
 }
@@ -486,6 +483,152 @@ async fn dispatch_check_step(
     .await;
 
     Ok(())
+}
+
+/// Execute a validate step: run Claude in print mode (-p) with structured
+/// output for a cheap LLM review. No full agent session — single inference.
+async fn dispatch_validate_step(
+    writer: &Writer,
+    model: &ModelDef,
+    inst: &statemachine::Instance,
+    work_item: &WorkItem,
+) -> Result<()> {
+    let validate_prompt = if work_item.prompt.is_empty() {
+        format!(
+            "Review the following and give a pass/fail verdict.\n\n## Task: {}\n\n{}",
+            inst.title, inst.body
+        )
+    } else {
+        format!(
+            "{}\n\n## Task: {}\n\n{}",
+            work_item.prompt, inst.title, inst.body
+        )
+    };
+
+    // Include previous step result if available.
+    let context_prompt = if let Some(ref result) = inst.result
+        && !result.is_empty()
+    {
+        format!(
+            "{}\n\n## Previous step result\n\n{}",
+            validate_prompt, result
+        )
+    } else {
+        validate_prompt
+    };
+
+    // Append JSON format instructions so Claude returns structured output.
+    let full_prompt = format!(
+        "{}\n\n---\nRespond with JSON only, exactly this schema:\n{{\"verdict\": \"pass\" or \"fail\", \"reason\": \"one sentence\"}}",
+        context_prompt
+    );
+
+    // Use the model from the command field if specified, otherwise default to haiku.
+    let validate_model = work_item.command.as_deref().unwrap_or("claude-haiku-4-5");
+
+    info!(
+        instance = %inst.id,
+        model = %validate_model,
+        "executing validate step"
+    );
+
+    let output = tokio::process::Command::new("claude")
+        .arg("-p")
+        .arg(&full_prompt)
+        .arg("--model")
+        .arg(validate_model)
+        .arg("--output-format")
+        .arg("json")
+        .arg("--max-turns")
+        .arg("1")
+        .output()
+        .await?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        warn!(
+            instance = %inst.id,
+            stderr = %stderr,
+            "validate step: claude process failed"
+        );
+        let store = statemachine::StateMachineStore::default_for_home();
+        let _ = Box::pin(handle_completion(
+            writer,
+            std::slice::from_ref(model),
+            &store,
+            &inst.id,
+            &format!("validate error: {stderr}"),
+            Some("validate step failed: claude process error"),
+        ))
+        .await;
+        return Ok(());
+    }
+
+    // Parse the structured verdict from Claude's JSON output.
+    // Claude with --output-format json wraps the response; extract the result text.
+    let verdict_text = extract_claude_json_result(&stdout);
+    let (result, error) = match serde_json::from_str::<serde_json::Value>(&verdict_text) {
+        Ok(v) => {
+            let verdict = v.get("verdict").and_then(|v| v.as_str()).unwrap_or("fail");
+            let reason = v
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("no reason provided");
+
+            if verdict == "pass" {
+                info!(instance = %inst.id, reason = %reason, "validate step passed");
+                (format!("PASS: {reason}"), None)
+            } else {
+                warn!(instance = %inst.id, reason = %reason, "validate step failed");
+                (
+                    format!("FAIL: {reason}"),
+                    Some(format!("validation failed: {reason}")),
+                )
+            }
+        }
+        Err(e) => {
+            warn!(
+                instance = %inst.id,
+                error = %e,
+                raw = %verdict_text,
+                "validate step: failed to parse verdict"
+            );
+            (
+                format!("parse error: {e}\nraw: {verdict_text}"),
+                Some(format!("validate step: could not parse verdict: {e}")),
+            )
+        }
+    };
+
+    let store = statemachine::StateMachineStore::default_for_home();
+    let _ = Box::pin(handle_completion(
+        writer,
+        std::slice::from_ref(model),
+        &store,
+        &inst.id,
+        &result,
+        error.as_deref(),
+    ))
+    .await;
+
+    Ok(())
+}
+
+/// Extract the result text from Claude's JSON output format.
+///
+/// When Claude runs with `--output-format json`, it outputs a JSON object
+/// with a `result` field containing the actual response text.
+fn extract_claude_json_result(raw: &str) -> String {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(raw) {
+        // Claude JSON output: {"result": "...", ...}
+        if let Some(result) = v.get("result").and_then(|r| r.as_str()) {
+            return result.to_string();
+        }
+    }
+    // Fallback: treat the whole output as the result.
+    raw.trim().to_string()
 }
 
 /// On startup, find non-terminal instances and dispatch them.
@@ -1170,5 +1313,148 @@ mod tests {
 
         let wi = build_work_item(&model, &inst);
         assert_eq!(wi.max_retries, 3);
+    }
+
+    #[test]
+    fn test_extract_claude_json_result_with_result_field() {
+        let raw = r#"{"result": "{\"verdict\": \"pass\", \"reason\": \"looks good\"}", "cost_usd": 0.001}"#;
+        let extracted = extract_claude_json_result(raw);
+        assert!(extracted.contains("verdict"));
+        assert!(extracted.contains("pass"));
+    }
+
+    #[test]
+    fn test_extract_claude_json_result_raw_fallback() {
+        let raw = r#"{"verdict": "fail", "reason": "bad code"}"#;
+        let extracted = extract_claude_json_result(raw);
+        assert_eq!(extracted, raw);
+    }
+
+    #[test]
+    fn test_validate_step_model_construction() {
+        let model = ModelDef {
+            name: "review-pipeline".into(),
+            description: "Pipeline with validation".into(),
+            states: vec!["draft".into(), "validated".into(), "done".into()],
+            initial: "draft".into(),
+            terminal: vec!["done".into()],
+            transitions: vec![
+                TransitionDef {
+                    from: "draft".into(),
+                    to: "validated".into(),
+                    trigger: Some("auto".into()),
+                    on: None,
+                    assignee: Some("workflow-engine".into()),
+                    prompt: Some("Review this code for security issues.".into()),
+                    step_type: StepType::Validate,
+                    command: Some("claude-haiku-4-5".into()),
+                    notify: None,
+                    timeout: None,
+                    timeout_goto: None,
+                    criteria: None,
+                    max_retries: 0,
+                },
+                TransitionDef {
+                    from: "validated".into(),
+                    to: "done".into(),
+                    trigger: Some("auto".into()),
+                    on: None,
+                    assignee: None,
+                    prompt: None,
+                    step_type: StepType::default(),
+                    command: None,
+                    notify: None,
+                    timeout: None,
+                    timeout_goto: None,
+                    criteria: None,
+                    max_retries: 0,
+                },
+            ],
+        };
+        let validate_transition = model
+            .transitions
+            .iter()
+            .find(|t| t.step_type == StepType::Validate)
+            .unwrap();
+        assert_eq!(
+            validate_transition.prompt.as_deref(),
+            Some("Review this code for security issues.")
+        );
+        assert_eq!(
+            validate_transition.command.as_deref(),
+            Some("claude-haiku-4-5")
+        );
+    }
+
+    /// JSON schema for validation step structured output (reference for future --json-schema flag).
+    const VALIDATE_SCHEMA: &str = r#"{
+        "type": "object",
+        "properties": {
+            "verdict": { "type": "string", "enum": ["pass", "fail"] },
+            "reason": { "type": "string" }
+        },
+        "required": ["verdict", "reason"]
+    }"#;
+
+    #[test]
+    fn test_validate_schema_is_valid_json() {
+        let parsed: serde_json::Value = serde_json::from_str(VALIDATE_SCHEMA).unwrap();
+        assert_eq!(
+            parsed["properties"]["verdict"]["enum"][0].as_str(),
+            Some("pass")
+        );
+        assert_eq!(
+            parsed["properties"]["verdict"]["enum"][1].as_str(),
+            Some("fail")
+        );
+    }
+
+    #[test]
+    fn test_build_work_item_validate() {
+        let model = ModelDef {
+            name: "review-pipeline".into(),
+            description: String::new(),
+            states: vec!["draft".into(), "validated".into(), "done".into()],
+            initial: "draft".into(),
+            terminal: vec!["done".into()],
+            transitions: vec![
+                TransitionDef {
+                    from: "draft".into(),
+                    to: "validated".into(),
+                    trigger: Some("auto".into()),
+                    on: None,
+                    assignee: Some("workflow-engine".into()),
+                    prompt: Some("Check for security issues.".into()),
+                    step_type: StepType::Validate,
+                    command: Some("claude-sonnet-4-6".into()),
+                    notify: None,
+                    timeout: None,
+                    timeout_goto: None,
+                    criteria: None,
+                    max_retries: 0,
+                },
+                TransitionDef {
+                    from: "validated".into(),
+                    to: "done".into(),
+                    trigger: Some("auto".into()),
+                    on: None,
+                    assignee: None,
+                    prompt: None,
+                    step_type: StepType::default(),
+                    command: None,
+                    notify: None,
+                    timeout: None,
+                    timeout_goto: None,
+                    criteria: None,
+                    max_retries: 0,
+                },
+            ],
+        };
+        let inst = make_instance("validated", "workflow-engine", "draft");
+
+        let wi = build_work_item(&model, &inst);
+        assert_eq!(wi.step_type, StepType::Validate);
+        assert_eq!(wi.command.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(wi.prompt, "Check for security issues.");
     }
 }
