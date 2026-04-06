@@ -15,6 +15,8 @@ use tracing::{info, warn};
 
 use crate::app::statemachine::StateMachineStore;
 use crate::app::task::TaskStore;
+use crate::app::workflow;
+use crate::domain::events::DomainEvent;
 use crate::domain::statemachine::ModelDef;
 use crate::domain::task::TaskStatus;
 
@@ -46,7 +48,11 @@ pub fn parse_duration(s: &str) -> Option<Duration> {
 ///
 /// `models` is the list of SM model definitions known to this agent instance.
 /// This is a long-running async function; call it inside `tokio::spawn`.
-pub async fn run_timeout_sweep(models: Vec<ModelDef>, sweep_interval: Duration) {
+pub async fn run_timeout_sweep(
+    models: Vec<ModelDef>,
+    sweep_interval: Duration,
+    bus_socket: String,
+) {
     info!(
         interval_secs = sweep_interval.as_secs(),
         "timeout sweep loop started"
@@ -56,14 +62,14 @@ pub async fn run_timeout_sweep(models: Vec<ModelDef>, sweep_interval: Duration) 
 
     loop {
         ticker.tick().await;
-        if let Err(e) = sweep_once(&models) {
+        if let Err(e) = sweep_once(&models, &bus_socket).await {
             warn!(error = %e, "timeout sweep encountered an error");
         }
     }
 }
 
 /// Execute a single sweep pass: check every active task with an SM instance.
-fn sweep_once(models: &[ModelDef]) -> anyhow::Result<()> {
+async fn sweep_once(models: &[ModelDef], bus_socket: &str) -> anyhow::Result<()> {
     let task_store = TaskStore::default_for_home();
     let sm_store = StateMachineStore::default_for_home();
 
@@ -185,6 +191,17 @@ fn sweep_once(models: &[ModelDef]) -> anyhow::Result<()> {
             timeout_goto = %timeout_goto,
             "timeout sweep: task expired and SM transitioned"
         );
+
+        // Emit TaskTimedOut event.
+        let _ = workflow::publish_event(
+            bus_socket,
+            "timeout-sweep",
+            &DomainEvent::TaskTimedOut {
+                task_id: task.id.clone(),
+                instance_id: Some(sm_id),
+            },
+        )
+        .await;
     }
 
     Ok(())

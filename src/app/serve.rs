@@ -191,8 +191,14 @@ pub async fn serve(config_path: String) -> Result<()> {
             // Start timeout sweep loop alongside the workflow engine.
             let sweep_models = models.clone();
             let sweep_interval = std::time::Duration::from_secs(30);
+            let sweep_bus = bus.clone();
             tokio::spawn(async move {
-                crate::app::timeout_sweep::run_timeout_sweep(sweep_models, sweep_interval).await;
+                crate::app::timeout_sweep::run_timeout_sweep(
+                    sweep_models,
+                    sweep_interval,
+                    sweep_bus,
+                )
+                .await;
             });
             info!(agent = %def.name, "started timeout sweep loop (interval=30s)");
 

@@ -13,7 +13,9 @@ use tracing::info;
 
 use crate::app::statemachine;
 use crate::app::unified_inbox;
+use crate::app::workflow;
 use crate::config::UserConfig;
+use crate::domain::events::DomainEvent;
 
 // ─── Reminder ────────────────────────────────────────────────────────────────
 
@@ -320,6 +322,19 @@ pub async fn sm_create(
     }
     info!(agent = %agent_name, instance = %inst.id, model = %model_name, "sm_create");
 
+    // Emit InstanceCreated event.
+    let _ = workflow::publish_event(
+        bus_socket,
+        agent_name,
+        &DomainEvent::InstanceCreated {
+            instance_id: inst.id.clone(),
+            model: model_name.to_string(),
+            title: title.to_string(),
+            created_by: agent_name.to_string(),
+        },
+    )
+    .await;
+
     // If the initial state has an assignee, dispatch the first task via the bus.
     if !inst.assignee.is_empty() {
         dispatch_sm_task(bus_socket, agent_name, &inst).await?;
@@ -412,6 +427,19 @@ pub async fn sm_move(
     let from = inst.state.clone();
     store.move_to(&mut inst, &model, state, agent_name, note, None, None)?;
     info!(agent = %agent_name, instance = %id, from = %from, to = %state, "sm_move");
+
+    // Emit TransitionApplied event.
+    let _ = workflow::publish_event(
+        bus_socket,
+        agent_name,
+        &DomainEvent::TransitionApplied {
+            instance_id: id.to_string(),
+            from: from.clone(),
+            to: state.to_string(),
+            trigger: agent_name.to_string(),
+        },
+    )
+    .await;
 
     // Notify workflow engine to dispatch if the new state has an assignee.
     if !inst.assignee.is_empty()

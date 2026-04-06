@@ -11,6 +11,7 @@ use crate::app::message::Message;
 use crate::app::tasklog;
 use crate::app::unified_inbox;
 use crate::domain::agent::AgentRuntime;
+use crate::domain::events::DomainEvent;
 use crate::infra::dto::ConfigSessionMode;
 
 /// Create an executor for the given runtime type.
@@ -606,6 +607,7 @@ struct TaskContext {
     task_raw: String,
     task_formatted: String,
     task_queue_id: Option<String>,
+    sm_instance_id: Option<String>,
     reply_target: String,
     telegram_chat_id: Option<i64>,
     github_repo: Option<String>,
@@ -689,10 +691,17 @@ fn extract_task_context(msg: &Message, _name: &str) -> Option<TaskContext> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
+    let sm_instance_id = msg
+        .payload
+        .get("sm_instance_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+
     Some(TaskContext {
         task_raw,
         task_formatted,
         task_queue_id,
+        sm_instance_id,
         reply_target,
         telegram_chat_id,
         github_repo,
@@ -886,6 +895,19 @@ async fn handle_task_success(
         )
         .await;
     }
+
+    // Emit domain event.
+    let summary = truncate(&response, 200).to_string();
+    emit_event(
+        writer,
+        name,
+        &DomainEvent::TaskCompleted {
+            task_id: ctx.task_queue_id.clone().unwrap_or_default(),
+            instance_id: ctx.sm_instance_id.clone(),
+            result_summary: summary,
+        },
+    )
+    .await;
 }
 
 /// Handle task failure: log, queue update, crash recovery, bus reply.
@@ -935,6 +957,18 @@ async fn handle_task_failure(
         name,
         &ctx.reply_target,
         serde_json::json!({"error": err_str, "in_reply_to": msg.id}),
+    )
+    .await;
+
+    // Emit domain event.
+    emit_event(
+        writer,
+        name,
+        &DomainEvent::TaskFailed {
+            task_id: ctx.task_queue_id.clone().unwrap_or_default(),
+            instance_id: ctx.sm_instance_id.clone(),
+            error: err_str,
+        },
     )
     .await;
 
@@ -1113,6 +1147,21 @@ async fn write_bus_envelope(
     line.push('\n');
     let mut w = writer.lock().await;
     let _ = w.write_all(line.as_bytes()).await;
+}
+
+/// Publish a domain event to the message bus via the worker's bus connection.
+async fn emit_event(
+    writer: &std::sync::Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
+    source: &str,
+    event: &DomainEvent,
+) {
+    write_bus_envelope(
+        writer,
+        source,
+        &format!("events:{}", event.event_type()),
+        event.to_json(),
+    )
+    .await;
 }
 
 fn truncate(s: &str, max: usize) -> &str {

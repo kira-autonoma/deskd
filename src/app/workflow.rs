@@ -7,10 +7,65 @@ use uuid::Uuid;
 use crate::app::message::Message;
 use crate::app::statemachine;
 use crate::app::worker;
+use crate::domain::events::DomainEvent;
 use crate::domain::statemachine::{ModelDef, StepType};
 use crate::domain::workitem::WorkItem;
 
 type Writer = std::sync::Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>;
+
+/// Publish a domain event to the message bus.
+///
+/// Events are sent to `events:<event_type>` targets so subscribers can
+/// use glob patterns like `events:*` to receive all events.
+async fn emit_event(writer: &Writer, event: &DomainEvent) {
+    let msg = serde_json::json!({
+        "type": "message",
+        "id": Uuid::new_v4().to_string(),
+        "source": "workflow-engine",
+        "target": format!("events:{}", event.event_type()),
+        "payload": event.to_json(),
+        "metadata": {"priority": 1u8},
+    });
+    if let Ok(mut line) = serde_json::to_string(&msg) {
+        line.push('\n');
+        let mut w = writer.lock().await;
+        if let Err(e) = w.write_all(line.as_bytes()).await {
+            warn!(error = %e, event = %event.event_type(), "failed to emit domain event");
+        }
+    }
+}
+
+/// Publish a domain event via a one-shot bus connection.
+///
+/// Used by callers outside the workflow engine (e.g. MCP handlers) to emit
+/// events without holding a persistent bus connection.
+pub async fn publish_event(bus_socket: &str, source: &str, event: &DomainEvent) -> Result<()> {
+    let mut stream = UnixStream::connect(bus_socket).await?;
+
+    let reg = serde_json::json!({
+        "type": "register",
+        "name": format!("{}-event-pub", source),
+        "subscriptions": []
+    });
+    let mut line = serde_json::to_string(&reg)?;
+    line.push('\n');
+    stream.write_all(line.as_bytes()).await?;
+
+    let msg = serde_json::json!({
+        "type": "message",
+        "id": Uuid::new_v4().to_string(),
+        "source": source,
+        "target": format!("events:{}", event.event_type()),
+        "payload": event.to_json(),
+        "metadata": {"priority": 1u8},
+    });
+    let mut msg_line = serde_json::to_string(&msg)?;
+    msg_line.push('\n');
+    stream.write_all(msg_line.as_bytes()).await?;
+    stream.flush().await?;
+
+    Ok(())
+}
 
 /// Notify the workflow engine that an SM instance was moved.
 ///
@@ -159,8 +214,29 @@ async fn handle_completion(
             "transition applied"
         );
 
-        // If not terminal and has assignee, dispatch.
-        if !statemachine::is_terminal(model, &inst) {
+        emit_event(
+            writer,
+            &DomainEvent::TransitionApplied {
+                instance_id: instance_id.to_string(),
+                from: current_state.clone(),
+                to: target.clone(),
+                trigger: "auto".into(),
+            },
+        )
+        .await;
+
+        // If terminal, emit completion event.
+        if statemachine::is_terminal(model, &inst) {
+            emit_event(
+                writer,
+                &DomainEvent::InstanceCompleted {
+                    instance_id: instance_id.to_string(),
+                    model: inst.model.clone(),
+                    final_state: target,
+                },
+            )
+            .await;
+        } else {
             dispatch_instance(writer, model, &inst).await?;
         }
     } else {
@@ -299,6 +375,16 @@ async fn dispatch_work_item(
                 let mut w = writer.lock().await;
                 w.write_all(line.as_bytes()).await?;
                 info!(instance = %work_item.instance_id, target = %notify_target, "human notification sent");
+                // Emit event so observers know a notification was sent.
+                emit_event(
+                    writer,
+                    &DomainEvent::TaskDispatched {
+                        task_id: String::new(),
+                        instance_id: Some(work_item.instance_id.clone()),
+                        assignee: notify_target.clone(),
+                    },
+                )
+                .await;
             }
             Ok(())
         }
@@ -336,6 +422,15 @@ async fn dispatch_agent(
             max_retries = work_item.max_retries,
             "task created in queue for SM dispatch"
         );
+        emit_event(
+            writer,
+            &DomainEvent::TaskDispatched {
+                task_id: task.id.clone(),
+                instance_id: Some(work_item.instance_id.clone()),
+                assignee: work_item.assignee.clone(),
+            },
+        )
+        .await;
         return Ok(());
     }
 
@@ -359,6 +454,15 @@ async fn dispatch_agent(
     w.write_all(line.as_bytes()).await?;
 
     info!(instance = %work_item.instance_id, assignee = %inst.assignee, "task dispatched via bus");
+    emit_event(
+        writer,
+        &DomainEvent::TaskDispatched {
+            task_id: String::new(), // direct bus dispatch has no task ID
+            instance_id: Some(work_item.instance_id.clone()),
+            assignee: inst.assignee.clone(),
+        },
+    )
+    .await;
     Ok(())
 }
 
