@@ -11,6 +11,7 @@ pub mod cli;
 pub mod commands;
 pub mod context;
 pub mod graph;
+pub mod jsonrpc;
 pub mod mcp;
 pub mod mcp_service;
 pub mod message;
