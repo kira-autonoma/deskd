@@ -6,6 +6,8 @@
 pub mod acp;
 pub mod adapters;
 pub mod agent;
+pub mod agent_process;
+pub mod agent_registry;
 pub mod bus;
 pub mod cli;
 pub mod commands;
@@ -15,6 +17,7 @@ pub mod jsonrpc;
 pub mod mcp;
 pub mod mcp_service;
 pub mod message;
+pub mod process_builder;
 pub mod schedule;
 pub mod serve;
 pub mod statemachine;
