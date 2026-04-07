@@ -10,6 +10,7 @@ pub mod sm;
 pub mod status;
 pub mod task;
 pub mod upgrade;
+pub mod usage;
 
 /// Truncate a string to a maximum length, appending an ellipsis if truncated.
 pub fn truncate(s: &str, max: usize) -> String {

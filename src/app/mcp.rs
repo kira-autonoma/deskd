@@ -522,6 +522,24 @@ fn handle_tools_list(
         }
     }));
 
+    tools.push(json!({
+        "name": "usage_stats",
+        "description": "Get aggregate token usage and cost statistics across agents. Returns total tasks, cost, tokens, and per-agent breakdown.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "period": {
+                    "type": "string",
+                    "description": "Time period: 'today', '24h', '7d' (default), '30d', 'all'"
+                },
+                "agent": {
+                    "type": "string",
+                    "description": "Filter to a specific agent name"
+                }
+            }
+        }
+    }));
+
     // Add state machine tools if models are defined.
     if user_config.map(|c| !c.models.is_empty()).unwrap_or(false) {
         tools.push(json!({
@@ -602,6 +620,7 @@ async fn handle_tools_call(
         "sm_create" => call_sm_create(args, agent_name, bus_socket, user_config).await,
         "sm_move" => call_sm_move(args, agent_name, bus_socket, user_config).await,
         "sm_query" => call_sm_query(args).await,
+        "usage_stats" => call_usage_stats(args).await,
         other => bail!("Unknown tool: {}", other),
     }
 }
@@ -1221,6 +1240,14 @@ fn build_send_message_description(cfg: &UserConfig, agent_name: &str) -> String 
     lines.join("\n")
 }
 
+async fn call_usage_stats(args: &Value) -> Result<Value> {
+    let period = args.get("period").and_then(|v| v.as_str()).unwrap_or("7d");
+    let agent = args.get("agent").and_then(|v| v.as_str());
+
+    let stats = crate::app::commands::usage::compute_stats(period, agent)?;
+    Ok(serde_json::to_value(stats)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1324,6 +1351,7 @@ mod tests {
         assert!(names.contains(&"search_inbox"));
         assert!(names.contains(&"run_graph"));
         assert!(names.contains(&"task_create"));
+        assert!(names.contains(&"usage_stats"));
     }
 
     #[tokio::test]

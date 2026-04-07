@@ -96,6 +96,13 @@ async fn main() -> anyhow::Result<()> {
         Commands::Upgrade { install_dir } => {
             commands::upgrade::handle(install_dir).await?;
         }
+        Commands::Usage {
+            period,
+            agent,
+            format,
+        } => {
+            commands::usage::run(&period, agent.as_deref(), &format).await?;
+        }
     }
 
     Ok(())

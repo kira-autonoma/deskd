@@ -103,6 +103,25 @@ pub enum Commands {
         #[command(subcommand)]
         action: TaskAction,
     },
+    /// Show aggregate token usage and cost across all agents.
+    ///
+    /// Examples:
+    ///   deskd usage                    # last 7 days, all agents
+    ///   deskd usage --period today     # today only
+    ///   deskd usage --period 30d       # last 30 days
+    ///   deskd usage --agent dev        # filter to one agent
+    ///   deskd usage --format json      # machine-readable output
+    Usage {
+        /// Time period: "today", "24h", "7d" (default), "30d", "all".
+        #[arg(long, default_value = "7d")]
+        period: String,
+        /// Filter to a specific agent.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Output format: "table" (default) or "json".
+        #[arg(long, default_value = "table")]
+        format: String,
+    },
     /// Schedule a one-shot reminder for an agent.
     ///
     /// Writes a RemindDef JSON to ~/.deskd/reminders/<uuid>.json.
