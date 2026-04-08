@@ -141,6 +141,10 @@ pub async fn run(agent_name: &str) -> Result<()> {
     // Lazy-initialized internal bus for sub-agent orchestration.
     let internal_bus: Arc<Mutex<Option<InternalBus>>> = Arc::new(Mutex::new(None));
 
+    // Create stores once at startup — passed as trait references to all handlers.
+    let task_store = crate::app::task::TaskStore::default_for_home();
+    let sm_store = crate::app::statemachine::StateMachineStore::default_for_home();
+
     info!(agent = %agent_name, bus = %bus_socket, "MCP server started");
 
     let stdin = tokio::io::stdin();
@@ -207,6 +211,8 @@ pub async fn run(agent_name: &str) -> Result<()> {
                     &bus_socket,
                     user_config.as_ref(),
                     &internal_bus,
+                    &task_store,
+                    &sm_store,
                 )
                 .await;
                 let mut out = stdout.lock().await;
@@ -265,6 +271,8 @@ async fn handle_request(
     bus_socket: &str,
     user_config: Option<&UserConfig>,
     internal_bus: &Arc<Mutex<Option<InternalBus>>>,
+    task_store: &dyn crate::ports::store::TaskRepository,
+    sm_store: &dyn crate::ports::store::StateMachineRepository,
 ) -> Response {
     let id = req.id.clone();
     match req.method.as_str() {
@@ -272,7 +280,16 @@ async fn handle_request(
         "tools/list" => handle_tools_list(id, agent_name, user_config),
         "tools/call" => {
             let params = req.params.as_ref().unwrap_or(&Value::Null);
-            match handle_tools_call(params, agent_name, bus_socket, user_config, internal_bus).await
+            match handle_tools_call(
+                params,
+                agent_name,
+                bus_socket,
+                user_config,
+                internal_bus,
+                task_store,
+                sm_store,
+            )
+            .await
             {
                 Ok(resp) => Response::ok(id, resp),
                 Err(e) => Response::err(id, -32603, &format!("{:#}", e)),
@@ -637,6 +654,8 @@ async fn handle_tools_call(
     bus_socket: &str,
     user_config: Option<&UserConfig>,
     internal_bus: &Arc<Mutex<Option<InternalBus>>>,
+    task_store: &dyn crate::ports::store::TaskRepository,
+    sm_store: &dyn crate::ports::store::StateMachineRepository,
 ) -> Result<Value> {
     let name = params
         .get("name")
@@ -657,14 +676,14 @@ async fn handle_tools_call(
         "read_inbox" => call_read_inbox(args).await,
         "search_inbox" => call_search_inbox(args).await,
         "run_graph" => call_run_graph(args).await,
-        "task_create" => call_task_create(args, agent_name).await,
-        "task_list" => call_task_list(args).await,
-        "task_cancel" => call_task_cancel(args).await,
+        "task_create" => call_task_create(args, agent_name, task_store).await,
+        "task_list" => call_task_list(args, task_store).await,
+        "task_cancel" => call_task_cancel(args, task_store).await,
         "list_agents" => call_list_agents(internal_bus).await,
         "remove_agent" => call_remove_agent(args, agent_name, internal_bus).await,
-        "sm_create" => call_sm_create(args, agent_name, bus_socket, user_config).await,
-        "sm_move" => call_sm_move(args, agent_name, bus_socket, user_config).await,
-        "sm_query" => call_sm_query(args).await,
+        "sm_create" => call_sm_create(args, agent_name, bus_socket, user_config, sm_store).await,
+        "sm_move" => call_sm_move(args, agent_name, bus_socket, user_config, sm_store).await,
+        "sm_query" => call_sm_query(args, sm_store).await,
         "usage_stats" => call_usage_stats(args).await,
         other => bail!("Unknown tool: {}", other),
     }
@@ -1067,7 +1086,11 @@ async fn call_run_graph(args: &Value) -> Result<Value> {
 
 // ─── Task queue tool implementations ─────────────────────────────────────────
 
-async fn call_task_create(args: &Value, agent_name: &str) -> Result<Value> {
+async fn call_task_create(
+    args: &Value,
+    agent_name: &str,
+    task_store: &dyn crate::ports::store::TaskRepository,
+) -> Result<Value> {
     let description = args
         .get("description")
         .and_then(|d| d.as_str())
@@ -1088,7 +1111,8 @@ async fn call_task_create(args: &Value, agent_name: &str) -> Result<Value> {
         .cloned()
         .unwrap_or(serde_json::Value::Null);
 
-    let result = mcp_service::task_create(description, model, labels, metadata, agent_name)?;
+    let result =
+        mcp_service::task_create(description, model, labels, metadata, agent_name, task_store)?;
 
     Ok(json!({
         "content": [{"type": "text", "text": format!(
@@ -1098,10 +1122,13 @@ async fn call_task_create(args: &Value, agent_name: &str) -> Result<Value> {
     }))
 }
 
-async fn call_task_list(args: &Value) -> Result<Value> {
+async fn call_task_list(
+    args: &Value,
+    task_store: &dyn crate::ports::store::TaskRepository,
+) -> Result<Value> {
     let status_filter = args.get("status").and_then(|s| s.as_str());
 
-    let summary = mcp_service::task_list(status_filter)?;
+    let summary = mcp_service::task_list(status_filter, task_store)?;
 
     Ok(json!({
         "content": [{"type": "text", "text": serde_json::to_string_pretty(&summary)?}],
@@ -1109,13 +1136,16 @@ async fn call_task_list(args: &Value) -> Result<Value> {
     }))
 }
 
-async fn call_task_cancel(args: &Value) -> Result<Value> {
+async fn call_task_cancel(
+    args: &Value,
+    task_store: &dyn crate::ports::store::TaskRepository,
+) -> Result<Value> {
     let id = args
         .get("id")
         .and_then(|i| i.as_str())
         .context("missing id")?;
 
-    let result = mcp_service::task_cancel(id)?;
+    let result = mcp_service::task_cancel(id, task_store)?;
 
     Ok(json!({
         "content": [{"type": "text", "text": format!("Task {} cancelled", result.id)}],
@@ -1198,6 +1228,7 @@ async fn call_sm_create(
     agent_name: &str,
     bus_socket: &str,
     user_config: Option<&UserConfig>,
+    sm_store: &dyn crate::ports::store::StateMachineRepository,
 ) -> Result<Value> {
     let model_name = args
         .get("model")
@@ -1215,7 +1246,7 @@ async fn call_sm_create(
 
     let cfg = user_config.context("no user config loaded — models not available")?;
     let result = mcp_service::sm_create(
-        model_name, title, body, metadata, agent_name, bus_socket, cfg,
+        model_name, title, body, metadata, agent_name, bus_socket, cfg, sm_store,
     )
     .await?;
 
@@ -1233,6 +1264,7 @@ async fn call_sm_move(
     agent_name: &str,
     bus_socket: &str,
     user_config: Option<&UserConfig>,
+    sm_store: &dyn crate::ports::store::StateMachineRepository,
 ) -> Result<Value> {
     let id = args
         .get("id")
@@ -1245,7 +1277,8 @@ async fn call_sm_move(
     let note = args.get("note").and_then(|n| n.as_str());
 
     let cfg = user_config.context("no user config loaded — models not available")?;
-    let result = mcp_service::sm_move(id, state, note, agent_name, bus_socket, cfg).await?;
+    let result =
+        mcp_service::sm_move(id, state, note, agent_name, bus_socket, cfg, sm_store).await?;
 
     Ok(json!({
         "content": [{"type": "text", "text": format!("{} → {} (model={})", result.id, result.state, result.model)}],
@@ -1253,12 +1286,15 @@ async fn call_sm_move(
     }))
 }
 
-async fn call_sm_query(args: &Value) -> Result<Value> {
+async fn call_sm_query(
+    args: &Value,
+    sm_store: &dyn crate::ports::store::StateMachineRepository,
+) -> Result<Value> {
     let id = args.get("id").and_then(|i| i.as_str());
     let model_filter = args.get("model").and_then(|m| m.as_str());
     let state_filter = args.get("state").and_then(|s| s.as_str());
 
-    let result = mcp_service::sm_query(id, model_filter, state_filter)?;
+    let result = mcp_service::sm_query(id, model_filter, state_filter, sm_store)?;
 
     Ok(json!({
         "content": [{"type": "text", "text": serde_json::to_string_pretty(&result)?}],
@@ -1547,7 +1583,18 @@ mod tests {
             method: "nonexistent/method".into(),
             params: None,
         };
-        let resp = handle_request(&req, "test", "/tmp/fake.sock", None, &internal_bus).await;
+        let task_store = crate::infra::memory_store::InMemoryTaskStore::new();
+        let sm_store = crate::infra::memory_store::InMemoryStateMachineStore::new();
+        let resp = handle_request(
+            &req,
+            "test",
+            "/tmp/fake.sock",
+            None,
+            &internal_bus,
+            &task_store,
+            &sm_store,
+        )
+        .await;
         assert!(resp.error.is_some());
         let err = resp.error.unwrap();
         assert_eq!(err["code"], -32601);
@@ -1557,13 +1604,24 @@ mod tests {
     #[tokio::test]
     async fn test_handle_request_initialize() {
         let internal_bus = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let task_store = crate::infra::memory_store::InMemoryTaskStore::new();
+        let sm_store = crate::infra::memory_store::InMemoryStateMachineStore::new();
         let req = Request {
             jsonrpc: "2.0".into(),
             id: Some(json!(1)),
             method: "initialize".into(),
             params: None,
         };
-        let resp = handle_request(&req, "test", "/tmp/fake.sock", None, &internal_bus).await;
+        let resp = handle_request(
+            &req,
+            "test",
+            "/tmp/fake.sock",
+            None,
+            &internal_bus,
+            &task_store,
+            &sm_store,
+        )
+        .await;
         assert!(resp.error.is_none());
         assert_eq!(resp.result.unwrap()["serverInfo"]["name"], "deskd");
     }

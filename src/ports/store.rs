@@ -56,6 +56,7 @@ pub trait TaskWriter: Send + Sync {
         turns: Option<u32>,
     ) -> Result<Task>;
     fn fail(&self, id: &str, error_msg: &str) -> Result<Task>;
+    fn save(&self, task: &Task) -> Result<()>;
 }
 
 /// Combined task persistence trait for code that needs both read and write access.

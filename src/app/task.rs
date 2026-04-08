@@ -409,6 +409,9 @@ impl crate::ports::store::TaskWriter for TaskStore {
     fn fail(&self, id: &str, error_msg: &str) -> Result<Task> {
         self.fail(id, error_msg)
     }
+    fn save(&self, task: &Task) -> Result<()> {
+        self.save_pub(task)
+    }
 }
 
 #[cfg(test)]

@@ -99,9 +99,10 @@ pub async fn handle(action: AgentAction) -> Result<()> {
             } else {
                 Some(subscribe)
             };
+            let task_store = crate::app::task::TaskStore::default_for_home();
             info!(agent = %name, "starting worker");
             tokio::select! {
-                result = worker::run(&name, &socket, Some(socket.clone()), subs) => { result?; }
+                result = worker::run(&name, &socket, Some(socket.clone()), subs, &task_store) => { result?; }
                 _ = tokio::signal::ctrl_c() => {
                     info!(agent = %name, "shutting down");
                 }

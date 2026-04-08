@@ -241,6 +241,12 @@ impl TaskWriter for InMemoryTaskStore {
         tasks.insert(id.to_string(), (&task).into());
         Ok(task)
     }
+
+    fn save(&self, task: &Task) -> Result<()> {
+        let dto: StoredTask = task.into();
+        self.tasks.lock().unwrap().insert(task.id.clone(), dto);
+        Ok(())
+    }
 }
 
 // ─── InMemoryStateMachineStore ───────────────────────────────────────────────

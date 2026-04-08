@@ -163,6 +163,7 @@ pub async fn run(
     socket_path: &str,
     bus_socket: Option<String>,
     subscriptions: Option<Vec<String>>,
+    task_store: &dyn crate::ports::store::TaskRepository,
 ) -> Result<()> {
     let initial_state = agent::load_state(name)?;
     let budget_usd = initial_state.config.budget_usd;
@@ -203,7 +204,7 @@ pub async fn run(
     info!(agent = %name, runtime = ?agent_runtime, "agent process ready, waiting for tasks");
 
     // Startup recovery: handle orphaned active tasks assigned to this agent.
-    recover_orphaned_tasks(name);
+    recover_orphaned_tasks(name, task_store);
 
     // Task queue polling interval (30 seconds).
     let mut queue_poll = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -223,8 +224,7 @@ pub async fn run(
             }
             _ = queue_poll.tick() => {
                 // Poll the task queue for pending tasks matching this worker.
-                let store = crate::app::task::TaskStore::default_for_home();
-                if let Ok(Some(task)) = store.claim_next(name, &agent_model, &agent_labels) {
+                if let Ok(Some(task)) = task_store.claim_next(name, &agent_model, &agent_labels) {
                     info!(
                         agent = %name,
                         task_id = %task.id,
@@ -489,12 +489,14 @@ pub async fn run(
                     &initial_state.config.work_dir,
                     &initial_state.config.model,
                     &writer,
+                    task_store,
                 )
                 .await;
             }
             Err(ref e) => {
                 let needs_restart =
-                    handle_task_failure(name, &msg, &ctx, e, task_duration_ms, &writer).await;
+                    handle_task_failure(name, &msg, &ctx, e, task_duration_ms, &writer, task_store)
+                        .await;
                 if needs_restart {
                     warn!(agent = %name, "agent process crashed, restarting with fresh session");
                     match start_executor_fresh(name, &effective_bus, &agent_runtime).await {
@@ -757,9 +759,8 @@ fn log_skip(name: &str, msg: &Message, ctx: &TaskContext, status: &str, error: O
 /// If deskd crashed while this agent was processing a task, the task is stuck in
 /// Active status with no one working on it. Tasks with results are completed;
 /// tasks without results are marked as Failed for visibility.
-fn recover_orphaned_tasks(agent_name: &str) {
-    let store = crate::app::task::TaskStore::default_for_home();
-    let active_tasks = match store.list(Some(crate::domain::task::TaskStatus::Active)) {
+fn recover_orphaned_tasks(agent_name: &str, task_store: &dyn crate::ports::store::TaskRepository) {
+    let active_tasks = match task_store.list(Some(crate::domain::task::TaskStatus::Active)) {
         Ok(tasks) => tasks,
         Err(_) => return,
     };
@@ -777,7 +778,7 @@ fn recover_orphaned_tasks(agent_name: &str) {
                 "recovering orphaned task with result: completing"
             );
             if let Err(e) =
-                store.complete(&task.id, task.result.as_deref().unwrap_or(""), None, None)
+                task_store.complete(&task.id, task.result.as_deref().unwrap_or(""), None, None)
             {
                 warn!(agent = %agent_name, task_id = %task.id, error = %e, "failed to complete orphaned task");
             }
@@ -790,7 +791,7 @@ fn recover_orphaned_tasks(agent_name: &str) {
             task_id = %task.id,
             "marking orphaned active task as Failed (no result, agent crashed)"
         );
-        if let Err(e) = store.fail(
+        if let Err(e) = task_store.fail(
             &task.id,
             &format!("agent {} crashed — task requires manual retry", agent_name),
         ) {
@@ -812,6 +813,7 @@ async fn handle_task_success(
     work_dir: &str,
     model: &str,
     writer: &std::sync::Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
+    task_store: &dyn crate::ports::store::TaskRepository,
 ) {
     info!(
         agent = %name,
@@ -863,7 +865,6 @@ async fn handle_task_success(
 
     // Update task queue if this came from the queue.
     if let Some(ref tq_id) = ctx.task_queue_id {
-        let store = crate::app::task::TaskStore::default_for_home();
         let result_text = if response.len() > 500 {
             let mut end = 500;
             while !response.is_char_boundary(end) {
@@ -873,7 +874,7 @@ async fn handle_task_success(
         } else {
             response.clone()
         };
-        if let Err(e) = store.complete(
+        if let Err(e) = task_store.complete(
             tq_id,
             &result_text,
             Some(turn.cost_usd),
@@ -919,6 +920,7 @@ async fn handle_task_failure(
     error: &anyhow::Error,
     task_duration_ms: u64,
     writer: &std::sync::Arc<tokio::sync::Mutex<tokio::net::unix::OwnedWriteHalf>>,
+    task_store: &dyn crate::ports::store::TaskRepository,
 ) -> bool {
     let err_str = format!("{}", error);
     warn!(agent = %name, error = %err_str, "task failed");
@@ -942,11 +944,10 @@ async fn handle_task_failure(
         warn!(agent = %name, error = %le, "failed to write task log");
     }
 
-    if let Some(ref tq_id) = ctx.task_queue_id {
-        let store = crate::app::task::TaskStore::default_for_home();
-        if let Err(e) = store.fail(tq_id, &err_str) {
-            warn!(agent = %name, task_id = %tq_id, error = %e, "failed to mark queue task failed");
-        }
+    if let Some(ref tq_id) = ctx.task_queue_id
+        && let Err(e) = task_store.fail(tq_id, &err_str)
+    {
+        warn!(agent = %name, task_id = %tq_id, error = %e, "failed to mark queue task failed");
     }
 
     let needs_restart = err_str.contains("process exited") || err_str.contains("stdin closed");

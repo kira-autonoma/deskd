@@ -16,6 +16,7 @@ use crate::app::unified_inbox;
 use crate::app::workflow;
 use crate::config::UserConfig;
 use crate::domain::events::DomainEvent;
+use crate::ports::store::{StateMachineRepository, TaskRepository};
 
 // ─── Reminder ────────────────────────────────────────────────────────────────
 
@@ -220,13 +221,13 @@ pub fn task_create(
     labels: Vec<String>,
     metadata: Value,
     created_by: &str,
+    task_store: &dyn TaskRepository,
 ) -> Result<TaskCreated> {
-    let store = crate::app::task::TaskStore::default_for_home();
     let criteria = crate::app::task::TaskCriteria { model, labels };
     let task = if metadata.is_null() {
-        store.create(description, criteria, created_by)?
+        task_store.create(description, criteria, created_by)?
     } else {
-        store.create_with_metadata(description, criteria, created_by, metadata)?
+        task_store.create_with_metadata(description, criteria, created_by, metadata)?
     };
 
     info!(agent = %created_by, task_id = %task.id, "task_create");
@@ -251,10 +252,12 @@ fn parse_task_status(s: &str) -> Option<crate::app::task::TaskStatus> {
 }
 
 /// List tasks, optionally filtered by status string.
-pub fn task_list(status_filter: Option<&str>) -> Result<Vec<Value>> {
+pub fn task_list(
+    status_filter: Option<&str>,
+    task_store: &dyn TaskRepository,
+) -> Result<Vec<Value>> {
     let filter = status_filter.and_then(parse_task_status);
-    let store = crate::app::task::TaskStore::default_for_home();
-    let tasks = store.list(filter)?;
+    let tasks = task_store.list(filter)?;
 
     Ok(tasks
         .iter()
@@ -277,9 +280,8 @@ pub struct TaskCancelled {
     pub id: String,
 }
 
-pub fn task_cancel(id: &str) -> Result<TaskCancelled> {
-    let store = crate::app::task::TaskStore::default_for_home();
-    let task = store.cancel(id)?;
+pub fn task_cancel(id: &str, task_store: &dyn TaskRepository) -> Result<TaskCancelled> {
+    let task = task_store.cancel(id)?;
     info!(task_id = %task.id, "task_cancel");
     Ok(TaskCancelled { id: task.id })
 }
@@ -296,6 +298,7 @@ pub struct SmCreated {
 
 /// Create a new state machine instance. If the initial state has an assignee,
 /// dispatches the first task to the bus.
+#[allow(clippy::too_many_arguments)]
 pub async fn sm_create(
     model_name: &str,
     title: &str,
@@ -304,6 +307,7 @@ pub async fn sm_create(
     agent_name: &str,
     bus_socket: &str,
     user_config: &UserConfig,
+    sm_store: &dyn StateMachineRepository,
 ) -> Result<SmCreated> {
     let model: statemachine::ModelDef = user_config
         .models
@@ -314,11 +318,10 @@ pub async fn sm_create(
         .try_into()
         .map_err(|e: String| anyhow::anyhow!("{e}"))?;
 
-    let store = statemachine::StateMachineStore::default_for_home();
-    let mut inst = store.create(&model, title, body, agent_name)?;
+    let mut inst = sm_store.create(&model, title, body, agent_name)?;
     if !metadata.is_null() {
         inst.metadata = metadata;
-        store.save(&inst)?;
+        sm_store.save(&inst)?;
     }
     info!(agent = %agent_name, instance = %inst.id, model = %model_name, "sm_create");
 
@@ -412,9 +415,9 @@ pub async fn sm_move(
     agent_name: &str,
     bus_socket: &str,
     user_config: &UserConfig,
+    sm_store: &dyn StateMachineRepository,
 ) -> Result<SmMoved> {
-    let store = statemachine::StateMachineStore::default_for_home();
-    let mut inst = store.load(id)?;
+    let mut inst = sm_store.load(id)?;
     let model: statemachine::ModelDef = user_config
         .models
         .iter()
@@ -425,7 +428,7 @@ pub async fn sm_move(
         .map_err(|e: String| anyhow::anyhow!("{e}"))?;
 
     let from = inst.state.clone();
-    store.move_to(&mut inst, &model, state, agent_name, note, None, None)?;
+    sm_store.move_to(&mut inst, &model, state, agent_name, note, None, None)?;
     info!(agent = %agent_name, instance = %id, from = %from, to = %state, "sm_move");
 
     // Emit TransitionApplied event.
@@ -461,16 +464,15 @@ pub fn sm_query(
     id: Option<&str>,
     model_filter: Option<&str>,
     state_filter: Option<&str>,
+    sm_store: &dyn StateMachineRepository,
 ) -> Result<Value> {
-    let store = statemachine::StateMachineStore::default_for_home();
-
     if let Some(id) = id {
-        let inst = store.load(id)?;
+        let inst = sm_store.load(id)?;
         let dto: crate::infra::dto::StoredInstance = (&inst).into();
         return Ok(serde_json::to_value(&dto)?);
     }
 
-    let mut instances = store.list_all()?;
+    let mut instances = sm_store.list_all()?;
     if let Some(mf) = model_filter {
         instances.retain(|i| i.model == mf);
     }

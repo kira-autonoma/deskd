@@ -107,8 +107,11 @@ pub async fn serve(config_path: String) -> Result<()> {
 
         // Start worker on the agent's bus.
         let bus = bus_socket.clone();
+        let worker_task_store = crate::app::task::TaskStore::default_for_home();
         tokio::spawn(async move {
-            if let Err(e) = worker::run(&name, &bus, Some(bus.clone()), None).await {
+            if let Err(e) =
+                worker::run(&name, &bus, Some(bus.clone()), None, &worker_task_store).await
+            {
                 tracing::error!(agent = %name, error = %e, "worker exited with error");
             }
         });
@@ -161,9 +164,16 @@ pub async fn serve(config_path: String) -> Result<()> {
                 let sub_name = sub.name.clone();
                 let bus = bus_socket.clone();
                 let subs = sub.subscribe.clone();
+                let sub_task_store = crate::app::task::TaskStore::default_for_home();
                 tokio::spawn(async move {
-                    if let Err(e) =
-                        worker::run(&sub_name, &bus, Some(bus.clone()), Some(subs)).await
+                    if let Err(e) = worker::run(
+                        &sub_name,
+                        &bus,
+                        Some(bus.clone()),
+                        Some(subs),
+                        &sub_task_store,
+                    )
+                    .await
                     {
                         tracing::error!(agent = %sub_name, error = %e, "sub-agent worker exited");
                     }
@@ -203,8 +213,21 @@ pub async fn serve(config_path: String) -> Result<()> {
             });
             info!(agent = %def.name, "started timeout sweep loop (interval=30s)");
 
+            let sm_store = crate::app::statemachine::StateMachineStore::default_for_home();
+            let task_store = crate::app::task::TaskStore::default_for_home();
             tokio::spawn(async move {
-                if let Err(e) = workflow::run(&bus, models).await {
+                let bus_client = match crate::infra::unix_bus::UnixBus::connect(&bus).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::error!(
+                            agent = %agent_name,
+                            error = %e,
+                            "workflow engine failed to connect to bus"
+                        );
+                        return;
+                    }
+                };
+                if let Err(e) = workflow::run(&bus_client, models, &sm_store, &task_store).await {
                     tracing::error!(agent = %agent_name, error = %e, "workflow engine exited");
                 }
             });
