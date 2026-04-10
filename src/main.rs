@@ -44,8 +44,9 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Serve {
             config: config_path,
+            tui,
         } => {
-            serve::serve(config_path).await?;
+            serve::serve(config_path, tui).await?;
         }
         Commands::Mcp { agent } => {
             mcp::run(&agent).await?;

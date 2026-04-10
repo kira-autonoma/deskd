@@ -31,6 +31,9 @@ pub enum Commands {
         /// Path to workspace.yaml.
         #[arg(long)]
         config: String,
+        /// Launch a terminal UI for real-time observability (requires --features tui).
+        #[arg(long, default_value = "false")]
+        tui: bool,
     },
     /// Run as MCP server for a specific agent (called by claude --mcp-server).
     /// Provides send_message and add_persistent_agent tools.

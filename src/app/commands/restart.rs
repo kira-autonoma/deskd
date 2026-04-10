@@ -64,7 +64,7 @@ pub async fn handle(config_override: Option<String>) -> Result<()> {
         None => {
             if let Some(cfg) = config_override {
                 info!("No running deskd serve found — starting fresh with {}", cfg);
-                crate::app::serve::serve(cfg).await?;
+                crate::app::serve::serve(cfg, false).await?;
                 return Ok(());
             }
             anyhow::bail!(
@@ -114,5 +114,5 @@ pub async fn handle(config_override: Option<String>) -> Result<()> {
     }
     info!(pid = pid, "old deskd serve exited — restarting");
 
-    crate::app::serve::serve(config_path).await
+    crate::app::serve::serve(config_path, false).await
 }

@@ -9,7 +9,7 @@ use crate::infra::paths;
 
 /// Start per-agent buses and workers for all agents in workspace config.
 /// Each agent has its own isolated bus at {work_dir}/.deskd/bus.sock.
-pub async fn serve(config_path: String) -> Result<()> {
+pub async fn serve(config_path: String, tui: bool) -> Result<()> {
     let workspace = config::WorkspaceConfig::load(&config_path)?;
     info!(path = %config_path, agents = workspace.agents.len(), "loaded workspace config");
 
@@ -236,6 +236,32 @@ pub async fn serve(config_path: String) -> Result<()> {
     }
 
     info!("all agents started — press Ctrl-C to stop");
+
+    #[cfg(feature = "tui")]
+    if tui {
+        // Collect bus sockets for all agents.
+        let bus_sockets: Vec<String> = workspace.agents.iter().map(|d| d.bus_socket()).collect();
+        let task_store = crate::app::task::TaskStore::default_for_home();
+        let sm_store = crate::app::statemachine::StateMachineStore::default_for_home();
+
+        let quit_all = crate::app::tui::app::run(bus_sockets, &task_store, &sm_store)
+            .await
+            .unwrap_or(false);
+
+        if quit_all {
+            config::ServeState::remove();
+            info!("TUI quit-all — shutting down");
+            return Ok(());
+        }
+        // q (quit TUI only) — fall through to Ctrl-C wait.
+        info!("TUI closed — deskd continues running, press Ctrl-C to stop");
+    }
+
+    #[cfg(not(feature = "tui"))]
+    if tui {
+        tracing::warn!("--tui requires building with --features tui; ignoring flag");
+    }
+
     tokio::signal::ctrl_c().await?;
     config::ServeState::remove();
     info!("shutting down");
