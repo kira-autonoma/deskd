@@ -5,14 +5,15 @@
 # All rules use the flat schema: rules.<rule>.{enabled, level, threshold, exclude}
 # Levels: taboo (CI blocker, exit 1) | telemetry (track, exit 0) | personal (info, exit 0)
 #
-# Current health: telemetry violations only (no taboo). Last reviewed: 2026-04-08.
+# Current health: telemetry violations only (no taboo). Last reviewed: 2026-04-11.
 # Known violations (telemetry, tracked):
-#   fan-out: workflow(9), worker(9), commands(12) — exceed threshold 7
-#   srp:     mcp(39), worker(34), graph(33) — exceed threshold 30
+#   fan-out: worker(9), commands(12), bus_api(~8) — exceed threshold 7
+#   srp:     mcp_tools(773L/many fns), worker(34), graph(33) — exceed threshold 30
 #   isp:     TaskWriter(8 methods), TaskRepository(9) — exceed threshold 7
-#   dip:     workflow::publish_event/notify_moved still call UnixBus::connect directly
-# PR #289 impact: workflow fan-out 8→9 (store trait injection), TaskWriter +save() (ISP).
-# See issues #290-#295 for cleanup plan.
+# Recently resolved: DIP workflow (#305), mcp SRP split (#307), stores→infra (#303),
+#   dto split (#294), DomainEvent serde→infra (#292), tokio from Executor port (#295).
+# New modules: tui (PR #301), bus_api (PR #316), mcp_protocol/mcp_tools (PR #307),
+#   infra/{task_store,sm_store,bus_server} (PR #303), infra/dto/* (PR #304).
 
 # Domain Model
 # =============
@@ -26,10 +27,12 @@
 #   src/ports/    — bus, store, executor traits
 #
 # Infrastructure Layer (I/O, external systems):
-#   src/infra/    — unix_bus, memory_bus, memory_store, dto
+#   src/infra/    — unix_bus, memory_bus, memory_store, task_store, sm_store,
+#                   bus_server, dto/{bus,config,context,instance,task}
 #
 # Application Layer (orchestration):
-#   src/app/      — worker, mcp, graph, workflow, statemachine, schedule, adapters
+#   src/app/      — worker, mcp, mcp_protocol, mcp_tools, mcp_service, graph,
+#                   workflow, schedule, adapters, bus_api, tui, context
 #   src/config.rs — YAML config parsing
 #
 # Entry Points / CLI:
@@ -118,10 +121,12 @@ rules:
   # SRP: modules with too many functions/methods.
   # Threshold 10 is too aggressive for our codebase — many modules legitimately
   # have 15-50 functions. Track at telemetry with a higher threshold.
+  # Issues #293 (mcp split) and #294 (dto split) are resolved; remaining violations:
+  # mcp_tools (tool impl collection, ~16 fns), worker (34), graph (33).
   srp:
     enabled: true
     level: telemetry
-    threshold: 30    # real limit: modules with 30+ fns have multiple responsibilities (#293, #294)
+    threshold: 30
 
   # Shotgun surgery: high afferent coupling (many dependents).
   # domain and app are container modules — naturally high Ca.
@@ -172,6 +177,22 @@ rules:
       # ACP (Agent Client Protocol) module — AcpProcess implements Executor.
       # Remaining structs are JSON-RPC protocol types (wire format, not domain).
       - "src::app::acp"             # AcpProcess (impl Executor) + JSON-RPC DTOs
+
+      # MCP protocol module — JSON-RPC I/O types + bus channel listener.
+      # Wire-format types (Request, Response, Notification) are protocol DTOs;
+      # no domain behaviour, no service abstraction warranted.
+      - "src::app::mcp_protocol"    # JSON-RPC protocol types + I/O helpers
+
+      # TUI view layer — terminal UI data models (App, BusEvent, AgentInfo, View).
+      # These are view-layer state carriers, not domain services. Data is read via
+      # port traits (&dyn TaskReader, &dyn StateMachineReader) — DIP is satisfied
+      # at the service boundary; the view structs themselves need no trait.
+      - "src::app::tui"             # App, BusEvent, AgentInfo, View — TUI state models
+
+      # Bus API handler — routes deskd:query/deskd:command messages to stores.
+      # Handler structs are request/response dispatchers, not domain services.
+      # All data access goes through existing store APIs (trait objects at boundaries).
+      - "src::app::bus_api"         # query/command router structs (22 method handlers)
 
       # Standalone binary — not part of the hexagonal architecture. session2graph
       # reads session logs and emits DOT graphs; it has no injected dependencies
