@@ -141,6 +141,10 @@ async fn dispatch(
         "inbox_read" => handle_inbox_read(params),
         "inbox_search" => handle_inbox_search(params),
         "bus_status" => handle_bus_status(bus_socket).await,
+        "room_list" => handle_room_list().await,
+        "room_children" => handle_room_children(params),
+        "agent_requests" => handle_agent_requests(params, task_store),
+        "agent_config_list" => handle_agent_config_list(),
 
         // ── Mutations ───────────────────────────────────────────────────
         "send_message" => handle_send_message(params, bus_socket, agent_name).await,
@@ -344,6 +348,127 @@ async fn handle_bus_status(bus_socket: &str) -> Result<Value> {
         "socket": bus_socket,
         "clients": client_list,
     }))
+}
+
+async fn handle_room_list() -> Result<Value> {
+    let serve_state = crate::config::ServeState::load()
+        .ok_or_else(|| anyhow::anyhow!("no serve state found (deskd serve not running?)"))?;
+
+    let mut rooms: Vec<Value> = Vec::new();
+    for (name, agent_serve) in &serve_state.agents {
+        let (status, cost_usd, _turns) = match crate::app::agent::load_state(name) {
+            Ok(state) => (state.status, state.total_cost, state.total_turns),
+            Err(_) => ("unknown".to_string(), 0.0, 0),
+        };
+
+        let agent_count = UserConfig::load(&agent_serve.config_path)
+            .map(|cfg| cfg.agents.len())
+            .unwrap_or(0);
+
+        rooms.push(json!({
+            "name": name,
+            "work_dir": agent_serve.work_dir,
+            "bus_socket": agent_serve.bus_socket,
+            "status": status,
+            "agent_count": agent_count,
+            "cost_usd": cost_usd,
+        }));
+    }
+    Ok(json!(rooms))
+}
+
+fn handle_room_children(params: &Value) -> Result<Value> {
+    let room = params
+        .get("room")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing 'room' parameter"))?;
+
+    let serve_state = crate::config::ServeState::load()
+        .ok_or_else(|| anyhow::anyhow!("no serve state found (deskd serve not running?)"))?;
+
+    let agent_serve = serve_state
+        .agent(room)
+        .ok_or_else(|| anyhow::anyhow!("room '{}' not found in serve state", room))?;
+
+    let user_config = UserConfig::load(&agent_serve.config_path)?;
+
+    let children: Vec<Value> = user_config
+        .agents
+        .iter()
+        .map(|sub| {
+            let status = crate::app::agent::load_state(&sub.name)
+                .map(|s| s.status)
+                .unwrap_or_else(|_| "configured".to_string());
+            json!({
+                "name": sub.name,
+                "model": sub.model,
+                "status": status,
+            })
+        })
+        .collect();
+
+    Ok(json!(children))
+}
+
+fn handle_agent_requests(
+    params: &Value,
+    task_store: &(dyn TaskRepository + Send + Sync),
+) -> Result<Value> {
+    let agent = params
+        .get("agent")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing 'agent' parameter"))?;
+
+    let all_tasks = task_store.list(None)?;
+
+    let matching: Vec<Value> = all_tasks
+        .iter()
+        .filter(|t| t.assignee.as_deref() == Some(agent) || t.created_by == agent)
+        .map(|t| {
+            json!({
+                "id": t.id,
+                "description": t.description,
+                "turns": t.turns,
+                "cost_usd": t.cost_usd,
+                "status": t.status.to_string(),
+                "created_at": t.created_at,
+            })
+        })
+        .collect();
+
+    Ok(json!(matching))
+}
+
+fn handle_agent_config_list() -> Result<Value> {
+    let serve_state = crate::config::ServeState::load()
+        .ok_or_else(|| anyhow::anyhow!("no serve state found (deskd serve not running?)"))?;
+
+    let mut configs: Vec<Value> = Vec::new();
+    for (name, agent_serve) in &serve_state.agents {
+        let user_config = match UserConfig::load(&agent_serve.config_path) {
+            Ok(cfg) => cfg,
+            Err(_) => continue,
+        };
+
+        configs.push(json!({
+            "name": name,
+            "model": user_config.model,
+            "system_prompt": user_config.system_prompt,
+            "max_turns": user_config.max_turns,
+        }));
+
+        // Also include sub-agents from this room's config.
+        for sub in &user_config.agents {
+            configs.push(json!({
+                "name": sub.name,
+                "model": sub.model,
+                "system_prompt": sub.system_prompt,
+                "max_turns": null,
+            }));
+        }
+    }
+
+    Ok(json!(configs))
 }
 
 // ─── Mutation handlers ──────────────────────────────────────────────────────
