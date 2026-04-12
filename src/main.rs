@@ -86,6 +86,9 @@ async fn main() -> anyhow::Result<()> {
         } => {
             commands::remind::handle(name, duration_str, at, target, message)?;
         }
+        Commands::Tui { socket } => {
+            commands::tui::handle(socket)?;
+        }
         Commands::Status { config: config_opt } => {
             let config_path = resolve_workspace_config(config_opt)?;
             commands::status::handle(&config_path).await?;

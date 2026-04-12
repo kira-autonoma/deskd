@@ -9,6 +9,7 @@ pub mod schedule;
 pub mod sm;
 pub mod status;
 pub mod task;
+pub mod tui;
 pub mod upgrade;
 pub mod usage;
 

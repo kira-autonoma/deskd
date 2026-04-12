@@ -122,6 +122,19 @@ pub enum Commands {
         #[arg(long, default_value = "table")]
         format: String,
     },
+    /// Launch the Ink/React TUI (connects to running deskd serve).
+    ///
+    /// Spawns `npx tsx tui/src/index.tsx` (or `bun run`) and forwards
+    /// stdin/stdout/stderr. Requires Node.js/bun and `npm install` in tui/.
+    ///
+    /// Examples:
+    ///   deskd tui
+    ///   deskd tui --socket /home/kira/.deskd/bus.sock
+    Tui {
+        /// Bus socket path. Auto-detected from running serve if omitted.
+        #[arg(long)]
+        socket: Option<String>,
+    },
     /// Schedule a one-shot reminder for an agent.
     ///
     /// Writes a RemindDef JSON to ~/.deskd/reminders/<uuid>.json.

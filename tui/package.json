@@ -1,0 +1,21 @@
+{
+  "name": "deskd-tui",
+  "version": "0.1.0",
+  "description": "Terminal UI for deskd agent orchestration runtime",
+  "type": "module",
+  "main": "src/index.tsx",
+  "scripts": {
+    "start": "tsx src/index.tsx",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ink": "^5.1.0",
+    "react": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.18",
+    "typescript": "^5.7.0",
+    "tsx": "^4.19.0",
+    "@types/node": "^22.10.0"
+  }
+}
