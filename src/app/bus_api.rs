@@ -143,6 +143,7 @@ async fn dispatch(
         "bus_status" => handle_bus_status(bus_socket).await,
         "room_list" => handle_room_list().await,
         "room_children" => handle_room_children(params),
+        "context_stats" => handle_context_stats(params, bus_socket).await,
         "agent_requests" => handle_agent_requests(params, task_store),
         "agent_messages" => handle_agent_messages(params),
         "agent_config_list" => handle_agent_config_list(),
@@ -461,6 +462,45 @@ fn handle_room_children(params: &Value) -> Result<Value> {
         .collect();
 
     Ok(json!(children))
+}
+
+async fn handle_context_stats(params: &Value, bus_socket: &str) -> Result<Value> {
+    let agent_filter = params.get("agent").and_then(|v| v.as_str());
+
+    let live = crate::app::serve::query_live_agents(bus_socket)
+        .await
+        .unwrap_or_default();
+    let agents = crate::app::agent::list().await?;
+
+    let stats: Vec<Value> = agents
+        .iter()
+        .filter(|s| agent_filter.is_none_or(|f| s.config.name == f))
+        .map(|state| {
+            let is_live = live.contains(&state.config.name);
+            json!({
+                "agent": state.config.name,
+                "context_tokens": null,
+                "context_limit": null,
+                "context_utilization": null,
+                "session_turns": state.total_turns,
+                "session_start": state.created_at,
+                "session_cost_usd": state.total_cost,
+                "last_turn_cost_usd": null,
+                "cache_hit_rate": null,
+                "status": if is_live { &state.status } else { "stopped" },
+                "model": state.config.model,
+            })
+        })
+        .collect();
+
+    if let Some(name) = agent_filter {
+        if let Some(stat) = stats.into_iter().next() {
+            return Ok(stat);
+        }
+        bail!("agent '{}' not found", name);
+    }
+
+    Ok(json!(stats))
 }
 
 fn handle_agent_requests(
