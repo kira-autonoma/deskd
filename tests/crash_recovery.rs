@@ -313,6 +313,8 @@ async fn test_tasklog_records_crash_error() {
         github_pr: Some(42),
         input_tokens: Some(1500),
         output_tokens: Some(200),
+        cache_creation_input_tokens: Some(500),
+        cache_read_input_tokens: Some(800),
     };
 
     let log_file = log_dir.join("crash-test-agent.jsonl");

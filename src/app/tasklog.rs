@@ -40,6 +40,12 @@ pub struct TaskLog {
     /// Output tokens produced.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
+    /// Tokens used to create cache entries.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cache_creation_input_tokens: Option<u64>,
+    /// Tokens read from cache.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cache_read_input_tokens: Option<u64>,
 }
 
 /// Return the path to the task log file for a given agent.
@@ -444,6 +450,8 @@ mod tests {
             github_pr: None,
             input_tokens: None,
             output_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
         }
     }
 
@@ -495,6 +503,8 @@ mod tests {
                     github_pr: None,
                     input_tokens: None,
                     output_tokens: None,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
                 };
                 let line = serde_json::to_string(&entry).unwrap();
                 writeln!(file, "{}", line).unwrap();

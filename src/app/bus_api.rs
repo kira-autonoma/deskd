@@ -136,6 +136,7 @@ async fn dispatch(
         "sm_detail" => handle_sm_detail(params, sm_store),
         "sm_models" => handle_sm_models(user_config),
         "usage_stats" => handle_usage_stats(params).await,
+        "agent_turn_stats" => handle_agent_turn_stats(params),
         "schedule_list" => handle_schedule_list(user_config),
         "inbox_list" => handle_inbox_list(),
         "inbox_read" => handle_inbox_read(params),
@@ -187,6 +188,26 @@ async fn handle_agent_detail(params: &Value) -> Result<Value> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing 'name' parameter"))?;
     let state = crate::app::agent::load_state(name)?;
+
+    // Aggregate token breakdown from task logs.
+    let entries = crate::app::tasklog::read_logs(name, usize::MAX, None, None).unwrap_or_default();
+    let mut input_tokens: u64 = 0;
+    let mut output_tokens: u64 = 0;
+    let mut cache_creation_input_tokens: u64 = 0;
+    let mut cache_read_input_tokens: u64 = 0;
+    for e in &entries {
+        input_tokens += e.input_tokens.unwrap_or(0);
+        output_tokens += e.output_tokens.unwrap_or(0);
+        cache_creation_input_tokens += e.cache_creation_input_tokens.unwrap_or(0);
+        cache_read_input_tokens += e.cache_read_input_tokens.unwrap_or(0);
+    }
+    let total_all_input = input_tokens + cache_creation_input_tokens + cache_read_input_tokens;
+    let cache_hit_rate = if total_all_input > 0 {
+        cache_read_input_tokens as f64 / total_all_input as f64
+    } else {
+        0.0
+    };
+
     Ok(json!({
         "name": state.config.name,
         "model": state.config.model,
@@ -201,6 +222,11 @@ async fn handle_agent_detail(params: &Value) -> Result<Value> {
         "status": state.status,
         "current_task": state.current_task,
         "parent": state.parent,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_creation_input_tokens": cache_creation_input_tokens,
+        "cache_read_input_tokens": cache_read_input_tokens,
+        "cache_hit_rate": cache_hit_rate,
     }))
 }
 
@@ -289,6 +315,48 @@ async fn handle_usage_stats(params: &Value) -> Result<Value> {
     let agent = params.get("agent").and_then(|v| v.as_str());
     let stats = crate::app::commands::usage::compute_stats(period, agent)?;
     Ok(serde_json::to_value(stats)?)
+}
+
+fn handle_agent_turn_stats(params: &Value) -> Result<Value> {
+    let name = params
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing 'name' parameter"))?;
+    let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+
+    let entries = crate::app::tasklog::read_logs(name, limit, None, None)?;
+
+    let turns: Vec<Value> = entries
+        .iter()
+        .map(|e| {
+            let input = e.input_tokens.unwrap_or(0);
+            let output = e.output_tokens.unwrap_or(0);
+            let cache_creation = e.cache_creation_input_tokens.unwrap_or(0);
+            let cache_read = e.cache_read_input_tokens.unwrap_or(0);
+            let total_input = input + cache_creation + cache_read;
+            let cache_hit_rate = if total_input > 0 {
+                cache_read as f64 / total_input as f64
+            } else {
+                0.0
+            };
+            json!({
+                "timestamp": e.ts,
+                "source": e.source,
+                "task": e.task,
+                "turns": e.turns,
+                "cost_usd": e.cost,
+                "duration_ms": e.duration_ms,
+                "status": e.status,
+                "input_tokens": input,
+                "output_tokens": output,
+                "cache_creation_input_tokens": cache_creation,
+                "cache_read_input_tokens": cache_read,
+                "cache_hit_rate": cache_hit_rate,
+            })
+        })
+        .collect();
+
+    Ok(json!(turns))
 }
 
 fn handle_schedule_list(user_config: Option<&UserConfig>) -> Result<Value> {
@@ -937,6 +1005,22 @@ mod tests {
     fn test_agent_messages_returns_array() {
         // With a non-existent agent we get an empty array (no inbox files).
         let result = handle_agent_messages(&json!({"agent": "nonexistent-agent-xyz"}));
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert!(val.is_array());
+        assert_eq!(val.as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_agent_turn_stats_missing_name() {
+        let result = handle_agent_turn_stats(&json!({}));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("missing 'name'"));
+    }
+
+    #[test]
+    fn test_agent_turn_stats_empty() {
+        let result = handle_agent_turn_stats(&json!({"name": "nonexistent-agent-xyz"}));
         assert!(result.is_ok());
         let val = result.unwrap();
         assert!(val.is_array());

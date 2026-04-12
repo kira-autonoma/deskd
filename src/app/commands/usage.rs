@@ -15,6 +15,8 @@ pub struct AgentStats {
     pub turns: u32,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
     pub duration_ms: u64,
 }
 
@@ -27,6 +29,10 @@ pub struct UsageStats {
     pub total_turns: u32,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
+    pub total_cache_creation_input_tokens: u64,
+    pub total_cache_read_input_tokens: u64,
+    /// Cache hit rate (0.0–1.0): cache_read / (cache_read + cache_creation + non-cache input).
+    pub cache_hit_rate: f64,
     pub total_duration_ms: u64,
     pub by_agent: Vec<AgentStats>,
 }
@@ -107,6 +113,8 @@ pub fn compute_stats(period: &str, agent_filter: Option<&str>) -> Result<UsageSt
                 turns: 0,
                 input_tokens: 0,
                 output_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
                 duration_ms: 0,
             });
 
@@ -116,6 +124,8 @@ pub fn compute_stats(period: &str, agent_filter: Option<&str>) -> Result<UsageSt
             stats.turns += e.turns;
             stats.input_tokens += e.input_tokens.unwrap_or(0);
             stats.output_tokens += e.output_tokens.unwrap_or(0);
+            stats.cache_creation_input_tokens += e.cache_creation_input_tokens.unwrap_or(0);
+            stats.cache_read_input_tokens += e.cache_read_input_tokens.unwrap_or(0);
             stats.duration_ms += e.duration_ms;
         }
     }
@@ -131,9 +141,24 @@ pub fn compute_stats(period: &str, agent_filter: Option<&str>) -> Result<UsageSt
     let total_tasks = agent_list.iter().map(|a| a.tasks).sum();
     let total_cost_usd = agent_list.iter().map(|a| a.cost_usd).sum();
     let total_turns = agent_list.iter().map(|a| a.turns).sum();
-    let total_input_tokens = agent_list.iter().map(|a| a.input_tokens).sum();
+    let total_input_tokens: u64 = agent_list.iter().map(|a| a.input_tokens).sum();
     let total_output_tokens = agent_list.iter().map(|a| a.output_tokens).sum();
+    let total_cache_creation_input_tokens: u64 = agent_list
+        .iter()
+        .map(|a| a.cache_creation_input_tokens)
+        .sum();
+    let total_cache_read_input_tokens: u64 =
+        agent_list.iter().map(|a| a.cache_read_input_tokens).sum();
     let total_duration_ms = agent_list.iter().map(|a| a.duration_ms).sum();
+
+    // Cache hit rate: proportion of input tokens served from cache.
+    let total_all_input =
+        total_input_tokens + total_cache_creation_input_tokens + total_cache_read_input_tokens;
+    let cache_hit_rate = if total_all_input > 0 {
+        total_cache_read_input_tokens as f64 / total_all_input as f64
+    } else {
+        0.0
+    };
 
     Ok(UsageStats {
         period: period.to_string(),
@@ -142,6 +167,9 @@ pub fn compute_stats(period: &str, agent_filter: Option<&str>) -> Result<UsageSt
         total_turns,
         total_input_tokens,
         total_output_tokens,
+        total_cache_creation_input_tokens,
+        total_cache_read_input_tokens,
+        cache_hit_rate,
         total_duration_ms,
         by_agent: agent_list,
     })
@@ -289,6 +317,9 @@ mod tests {
             total_turns: 42,
             total_input_tokens: 100_000,
             total_output_tokens: 25_000,
+            total_cache_creation_input_tokens: 5_000,
+            total_cache_read_input_tokens: 80_000,
+            cache_hit_rate: 80_000.0 / (100_000.0 + 5_000.0 + 80_000.0),
             total_duration_ms: 300_000,
             by_agent: vec![AgentStats {
                 agent: "test".to_string(),
@@ -297,11 +328,16 @@ mod tests {
                 turns: 42,
                 input_tokens: 100_000,
                 output_tokens: 25_000,
+                cache_creation_input_tokens: 5_000,
+                cache_read_input_tokens: 80_000,
                 duration_ms: 300_000,
             }],
         };
         let json = serde_json::to_string(&stats).unwrap();
         assert!(json.contains("\"total_tasks\":10"));
         assert!(json.contains("\"total_cost_usd\":5.5"));
+        assert!(json.contains("\"total_cache_creation_input_tokens\":5000"));
+        assert!(json.contains("\"total_cache_read_input_tokens\":80000"));
+        assert!(json.contains("\"cache_hit_rate\":"));
     }
 }

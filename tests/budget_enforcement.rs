@@ -166,6 +166,8 @@ async fn test_budget_exceeded_sends_error_and_logs() {
         github_pr: None,
         input_tokens: None,
         output_tokens: None,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
     };
     deskd::app::tasklog::log_task_to_path(&log_path, &log_entry).unwrap();
 

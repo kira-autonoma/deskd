@@ -289,6 +289,8 @@ pub async fn run(
                     github_pr: msg.payload.get("github_pr").and_then(|p| p.as_u64()),
                     input_tokens: None,
                     output_tokens: None,
+                    cache_creation_input_tokens: None,
+                    cache_read_input_tokens: None,
                 };
                 if let Err(e) = tasklog::log_task(name, &empty_log) {
                     warn!(agent = %name, error = %e, "failed to write task log");
@@ -768,6 +770,8 @@ fn log_skip(name: &str, msg: &Message, ctx: &TaskContext, status: &str, error: O
         github_pr: ctx.github_pr,
         input_tokens: None,
         output_tokens: None,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
     };
     if let Err(e) = tasklog::log_task(name, &log_entry) {
         warn!(agent = %name, error = %e, "failed to write task log");
@@ -868,6 +872,8 @@ async fn handle_task_success(
         github_pr: ctx.github_pr,
         input_tokens: Some(turn.token_usage.input_tokens),
         output_tokens: Some(turn.token_usage.output_tokens),
+        cache_creation_input_tokens: Some(turn.token_usage.cache_creation_input_tokens),
+        cache_read_input_tokens: Some(turn.token_usage.cache_read_input_tokens),
     };
     if let Err(e) = tasklog::log_task(name, &log_entry) {
         warn!(agent = %name, error = %e, "failed to write task log");
@@ -959,6 +965,8 @@ async fn handle_task_failure(
         github_pr: ctx.github_pr,
         input_tokens: None,
         output_tokens: None,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
     };
     if let Err(le) = tasklog::log_task(name, &log_entry) {
         warn!(agent = %name, error = %le, "failed to write task log");
