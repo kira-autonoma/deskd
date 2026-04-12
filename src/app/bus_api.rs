@@ -216,6 +216,8 @@ async fn handle_agent_detail(params: &Value) -> Result<Value> {
         "max_turns": state.config.max_turns,
         "pid": state.pid,
         "session_id": state.session_id,
+        "claude_session_id": state.session_id,
+        "session_start": state.session_start,
         "total_turns": state.total_turns,
         "total_cost": state.total_cost,
         "created_at": state.created_at,

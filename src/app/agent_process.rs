@@ -4,6 +4,7 @@
 //! inject_message, kill, stop, and implements `Executor` trait.
 
 use anyhow::{Context, Result, bail};
+use chrono::Utc;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
@@ -166,6 +167,7 @@ impl AgentProcess {
 
                 if let Ok(mut s) = load_state(name) {
                     s.session_id.clear();
+                    s.session_start = None;
                     save_state_pub(&s).ok();
                 }
 
@@ -715,6 +717,9 @@ impl AgentProcess {
                         if state.config.session == ConfigSessionMode::Persistent
                             && !result.session_id.is_empty()
                         {
+                            if state.session_id != result.session_id {
+                                state.session_start = Some(Utc::now().to_rfc3339());
+                            }
                             state.session_id = result.session_id.clone();
                         }
                         state.total_cost += cost_delta;

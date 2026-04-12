@@ -74,6 +74,10 @@ pub struct AgentState {
     /// Name of the parent agent that spawned this sub-agent, if any.
     #[serde(default)]
     pub parent: Option<String>,
+    /// Timestamp (RFC 3339) of when the current Claude session started.
+    /// Updated whenever session_id changes (new session or resume).
+    #[serde(default)]
+    pub session_start: Option<String>,
 }
 
 fn default_status() -> String {
@@ -152,6 +156,7 @@ pub async fn create(cfg: &AgentConfig) -> Result<AgentState> {
         status: "idle".to_string(),
         current_task: String::new(),
         parent: None,
+        session_start: None,
     };
 
     save_state(&state)?;
@@ -181,6 +186,7 @@ pub async fn create_or_update_from_config(cfg: &AgentConfig) -> Result<AgentStat
         status: "idle".to_string(),
         current_task: String::new(),
         parent: None,
+        session_start: None,
     };
     save_state(&state)?;
     info!(agent = %cfg.name, "sub-agent created");
@@ -241,6 +247,7 @@ pub async fn create_or_recover(
         status: "idle".to_string(),
         current_task: String::new(),
         parent: None,
+        session_start: None,
     };
     save_state(&state)?;
     info!(agent = %def.name, "agent created");
@@ -467,6 +474,9 @@ async fn send_inner(
     let stderr_str = stderr_task.await.unwrap_or_default();
 
     if state.config.session == ConfigSessionMode::Persistent && !new_session_id.is_empty() {
+        if state.session_id != new_session_id {
+            state.session_start = Some(Utc::now().to_rfc3339());
+        }
         state.session_id = new_session_id;
     }
     state.total_cost += task_cost;
@@ -480,6 +490,7 @@ async fn send_inner(
         if !state.session_id.is_empty() {
             warn!(agent = %name, session_id = %state.session_id, "stale session_id — retrying without --resume");
             state.session_id = String::new();
+            state.session_start = None;
             save_state(&state)?;
             return Box::pin(send_inner(
                 name,
@@ -688,6 +699,7 @@ created_at: "2024-01-01T00:00:00Z"
             status: "idle".to_string(),
             current_task: String::new(),
             parent: None,
+            session_start: Some(Utc::now().to_rfc3339()),
         };
         let yaml = serde_yaml::to_string(&state).unwrap();
         let restored: AgentState = serde_yaml::from_str(&yaml).unwrap();
@@ -744,6 +756,7 @@ created_at: "2024-01-01T00:00:00Z"
             status: "idle".to_string(),
             current_task: String::new(),
             parent: Some("parent-agent".to_string()),
+            session_start: Some("2026-01-01T00:00:00Z".to_string()),
         };
 
         save_state(&state).unwrap();

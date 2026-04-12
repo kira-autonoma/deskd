@@ -4,6 +4,7 @@
 //! ACP-compatible agents (Gemini CLI, Goose, etc.).
 
 use anyhow::{Context, Result, bail};
+use chrono::Utc;
 use std::collections::HashMap;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
@@ -525,6 +526,9 @@ impl AcpProcess {
         // Update agent state.
         if let Ok(mut state) = agent::load_state(&self.name) {
             if state.config.session == ConfigSessionMode::Persistent {
+                if state.session_id != session_id {
+                    state.session_start = Some(Utc::now().to_rfc3339());
+                }
                 state.session_id = session_id;
             }
             // ACP doesn't report cost — we track turns only.
