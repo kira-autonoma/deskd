@@ -160,6 +160,8 @@ async fn dispatch(
         "sm_cancel" => handle_sm_cancel(params, sm_store),
         "schedule_add" => handle_schedule_add(params, user_config, agent_name),
         "schedule_remove" => handle_schedule_remove(params, user_config, agent_name),
+        "agent_restart" => handle_agent_restart(params, bus_socket, agent_name).await,
+        "agent_compress" => handle_agent_compress(params, bus_socket, agent_name).await,
 
         _ => bail!("unknown method: {}", method),
     }
@@ -937,6 +939,76 @@ fn handle_schedule_remove(
         "index": index,
         "removed": true,
         "cron": removed.cron,
+    }))
+}
+
+async fn handle_agent_restart(params: &Value, _bus_socket: &str, caller: &str) -> Result<Value> {
+    let agent = params
+        .get("agent")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing 'agent' parameter"))?;
+
+    let state = crate::app::agent::load_state(agent)?;
+    let pid = state.pid;
+
+    if pid > 0 {
+        mcp_service::stop_agent_process(agent, pid).await;
+    }
+
+    // Reset session fields so the worker starts a fresh session on next task.
+    let mut updated = crate::app::agent::load_state(agent)?;
+    updated.session_id.clear();
+    updated.session_cost = 0.0;
+    updated.session_turns = 0;
+    updated.session_start = None;
+    updated.status = "restarting".to_string();
+    crate::app::agent::save_state_pub(&updated)?;
+
+    info!(agent = %agent, pid = pid, caller = %caller, "agent_restart via bus API");
+
+    Ok(json!({
+        "agent": agent,
+        "restarted": true,
+        "previous_pid": pid,
+    }))
+}
+
+async fn handle_agent_compress(params: &Value, bus_socket: &str, caller: &str) -> Result<Value> {
+    let agent = params
+        .get("agent")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing 'agent' parameter"))?;
+
+    // Send a summarization task to the agent before restarting.
+    let sender = UnixBus::connect(bus_socket).await?;
+    sender
+        .register(&format!("{}-compress", caller), &[])
+        .await?;
+
+    let summary_task = "Summarize the key decisions, artifacts, and context from this session \
+        into a concise summary. Include: (1) what was accomplished, (2) any pending work, \
+        (3) important decisions made. Write the summary to your inbox so the next session can read it.";
+
+    let msg = crate::domain::message::Message {
+        id: uuid::Uuid::new_v4().to_string(),
+        source: API_CLIENT_NAME.to_string(),
+        target: format!("agent:{}", agent),
+        payload: json!({"task": summary_task}),
+        reply_to: None,
+        metadata: crate::domain::message::Metadata {
+            priority: 10,
+            fresh: false,
+        },
+    };
+    sender.send(&msg).await?;
+
+    info!(agent = %agent, caller = %caller, "agent_compress: summary task sent, will restart after processing");
+
+    Ok(json!({
+        "agent": agent,
+        "compress_initiated": true,
+        "summary_task_id": msg.id,
+        "note": "Agent will process the summary task, then restart manually or via next agent_restart call",
     }))
 }
 
