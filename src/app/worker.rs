@@ -395,6 +395,20 @@ pub async fn run(
                         serde_json::json!({"result": text, "in_reply_to": msg_id_owned}),
                     )
                     .await;
+
+                    // Broadcast agent_output event for dashboard live feed (#328).
+                    write_bus_envelope(
+                        &writer_fwd,
+                        &name_owned,
+                        "broadcast",
+                        serde_json::json!({
+                            "event": "agent_output",
+                            "agent": name_owned,
+                            "line": text,
+                            "timestamp": chrono::Utc::now().to_rfc3339(),
+                        }),
+                    )
+                    .await;
                 }
             }
             full_response
