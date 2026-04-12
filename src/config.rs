@@ -37,9 +37,28 @@ fn default_budget_usd() -> f64 {
 pub struct WorkspaceConfig {
     #[serde(default)]
     pub agents: Vec<AgentDef>,
+    /// Named rooms — formal groupings of agents with shared context.
+    /// When present, `room_list` returns these instead of treating each agent as a room.
+    #[serde(default)]
+    pub rooms: Vec<RoomDef>,
     /// Telegram user IDs allowed to run admin commands (/restart, etc.).
     #[serde(default)]
     pub admin_telegram_ids: Vec<i64>,
+}
+
+/// A room is a named work context: namespace + context folder + set of agents.
+/// Rooms are the primary drill-down unit in dashboard navigation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomDef {
+    pub name: String,
+    /// Working directory for the room (agents inherit this).
+    pub work_dir: String,
+    /// Path to a context file (e.g. CLAUDE.md) shared by all agents in the room.
+    #[serde(default)]
+    pub context: Option<String>,
+    /// Names of agents that belong to this room (must be defined in `agents` section).
+    #[serde(default)]
+    pub agents: Vec<String>,
 }
 
 /// Telegram bot adapter config. Defined per-agent — each agent has its own bot.
@@ -173,6 +192,9 @@ pub struct ServeState {
     /// Per-agent runtime info.
     #[serde(default)]
     pub agents: HashMap<String, AgentServeState>,
+    /// Formal room definitions from workspace config.
+    #[serde(default)]
+    pub rooms: Vec<RoomDef>,
 }
 
 /// Per-agent runtime info in serve state.
@@ -670,6 +692,47 @@ agents:
 "#;
         let cfg: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(cfg.agents[0].container.is_none());
+    }
+
+    #[test]
+    fn test_workspace_config_with_rooms() {
+        let yaml = r#"
+agents:
+  - name: kira
+    work_dir: /home/kira
+  - name: dev
+    work_dir: /home/dev
+rooms:
+  - name: features
+    work_dir: ~/work/project
+    context: ~/work/project/CLAUDE.md
+    agents: [kira]
+  - name: reviews
+    work_dir: ~/work/reviews
+    agents: [dev]
+"#;
+        let cfg: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.rooms.len(), 2);
+        assert_eq!(cfg.rooms[0].name, "features");
+        assert_eq!(cfg.rooms[0].work_dir, "~/work/project");
+        assert_eq!(
+            cfg.rooms[0].context.as_deref(),
+            Some("~/work/project/CLAUDE.md")
+        );
+        assert_eq!(cfg.rooms[0].agents, vec!["kira"]);
+        assert_eq!(cfg.rooms[1].name, "reviews");
+        assert!(cfg.rooms[1].context.is_none());
+    }
+
+    #[test]
+    fn test_workspace_config_rooms_default_empty() {
+        let yaml = r#"
+agents:
+  - name: kira
+    work_dir: /home/kira
+"#;
+        let cfg: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.rooms.is_empty());
     }
 
     #[test]

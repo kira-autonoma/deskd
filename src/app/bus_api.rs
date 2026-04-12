@@ -355,6 +355,37 @@ async fn handle_room_list() -> Result<Value> {
     let serve_state = crate::config::ServeState::load()
         .ok_or_else(|| anyhow::anyhow!("no serve state found (deskd serve not running?)"))?;
 
+    // If formal rooms are defined, use them. Otherwise fall back to treating each
+    // top-level agent as a room (backward compatible).
+    if !serve_state.rooms.is_empty() {
+        let rooms: Vec<Value> = serve_state
+            .rooms
+            .iter()
+            .map(|room| {
+                let mut total_cost = 0.0;
+                let mut active_count = 0;
+                for agent_name in &room.agents {
+                    if let Ok(state) = crate::app::agent::load_state(agent_name) {
+                        total_cost += state.total_cost;
+                        if state.status == "active" || state.status == "idle" {
+                            active_count += 1;
+                        }
+                    }
+                }
+                json!({
+                    "name": room.name,
+                    "work_dir": room.work_dir,
+                    "context": room.context,
+                    "agent_count": room.agents.len(),
+                    "active_agents": active_count,
+                    "cost_usd": total_cost,
+                })
+            })
+            .collect();
+        return Ok(json!(rooms));
+    }
+
+    // Fallback: each top-level agent is a room.
     let mut rooms: Vec<Value> = Vec::new();
     for (name, agent_serve) in &serve_state.agents {
         let (status, cost_usd, _turns) = match crate::app::agent::load_state(name) {
@@ -387,6 +418,27 @@ fn handle_room_children(params: &Value) -> Result<Value> {
     let serve_state = crate::config::ServeState::load()
         .ok_or_else(|| anyhow::anyhow!("no serve state found (deskd serve not running?)"))?;
 
+    // If formal rooms are defined, look up children from the room definition.
+    if let Some(room_def) = serve_state.rooms.iter().find(|r| r.name == room) {
+        let children: Vec<Value> = room_def
+            .agents
+            .iter()
+            .map(|agent_name| {
+                let (status, model) = match crate::app::agent::load_state(agent_name) {
+                    Ok(state) => (state.status, state.config.model),
+                    Err(_) => ("configured".to_string(), String::new()),
+                };
+                json!({
+                    "name": agent_name,
+                    "model": model,
+                    "status": status,
+                })
+            })
+            .collect();
+        return Ok(json!(children));
+    }
+
+    // Fallback: look up room as an agent name, list its sub-agents.
     let agent_serve = serve_state
         .agent(room)
         .ok_or_else(|| anyhow::anyhow!("room '{}' not found in serve state", room))?;

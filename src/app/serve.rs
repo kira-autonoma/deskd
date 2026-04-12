@@ -25,6 +25,7 @@ pub async fn serve(config_path: String) -> Result<()> {
             .into_owned(),
         started_at: chrono::Utc::now().to_rfc3339(),
         agents: std::collections::HashMap::new(),
+        rooms: workspace.rooms.clone(),
     };
     for def in &workspace.agents {
         serve_state.agents.insert(
