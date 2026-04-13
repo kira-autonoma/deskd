@@ -7,7 +7,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{RwLock, mpsc};
 use tracing::{debug, info, warn};
 
-use crate::app::message::Message;
+use crate::domain::message::Message;
 use crate::infra::dto::{BusEnvelope, BusMessage};
 
 type Tx = mpsc::UnboundedSender<Message>;
@@ -236,7 +236,7 @@ async fn handle_connection(stream: UnixStream, state: Arc<RwLock<BusState>>) -> 
                             "clients_detail": clients_detail,
                         }),
                         reply_to: None,
-                        metadata: crate::app::message::Metadata::default(),
+                        metadata: crate::domain::message::Metadata::default(),
                     };
                     let _ = client.tx.send(resp);
                 }
@@ -258,7 +258,7 @@ async fn handle_connection(stream: UnixStream, state: Arc<RwLock<BusState>>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::message::Metadata;
+    use crate::domain::message::Metadata;
     use std::collections::HashSet;
 
     fn make_bus() -> BusState {
