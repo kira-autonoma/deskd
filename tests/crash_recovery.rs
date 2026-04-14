@@ -85,6 +85,7 @@ fn test_agent_config(name: &str) -> deskd::app::agent::AgentConfig {
         session: deskd::infra::dto::ConfigSessionMode::Persistent,
         runtime: deskd::infra::dto::ConfigAgentRuntime::Claude,
         context: None,
+        compact_threshold: None,
     }
 }
 

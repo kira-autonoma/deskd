@@ -181,6 +181,7 @@ pub async fn serve(config_path: String) -> Result<()> {
                     session: sub.session.clone(),
                     runtime: sub.runtime.clone(),
                     context: context_cfg,
+                    compact_threshold: sub.compact_threshold,
                 };
                 agent::create_or_update_from_config(&sub_cfg).await?;
 

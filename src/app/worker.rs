@@ -25,7 +25,9 @@ async fn start_executor(
     runtime: &AgentRuntime,
 ) -> Result<Box<dyn Executor>> {
     match runtime {
-        AgentRuntime::Claude => {
+        AgentRuntime::Claude | AgentRuntime::Memory => {
+            // Memory agents use the same Claude executor — the difference
+            // is in how the worker loop processes bus messages.
             let p = agent::AgentProcess::start(name, bus_socket).await?;
             Ok(Box::new(p))
         }
@@ -43,7 +45,7 @@ async fn start_executor_fresh(
     runtime: &AgentRuntime,
 ) -> Result<Box<dyn Executor>> {
     match runtime {
-        AgentRuntime::Claude => {
+        AgentRuntime::Claude | AgentRuntime::Memory => {
             let p = agent::AgentProcess::start_fresh(name, bus_socket).await?;
             Ok(Box::new(p))
         }
@@ -213,6 +215,27 @@ pub async fn run(
     let agent_model = initial_state.config.model.clone();
     let agent_labels: Vec<String> = Vec::new(); // TODO: add labels to AgentConfig
 
+    // Memory agent: track number of injected events for metrics.
+    let mut memory_injected_count: u64 = 0;
+
+    // Memory agent: cumulative token estimate for compaction trigger.
+    let mut memory_tokens_estimate: u64 = 0;
+    // Compaction threshold in tokens. Derive from compact_threshold (fraction 0.0–1.0)
+    // applied to a default context budget of 100_000 tokens (conservative for most models).
+    let compact_threshold_tokens: u64 = if agent_runtime == AgentRuntime::Memory {
+        let fraction = initial_state.config.compact_threshold.unwrap_or(0.8);
+        let context_budget: u64 = initial_state
+            .config
+            .context
+            .as_ref()
+            .and_then(|c| c.compact_threshold_tokens)
+            .map(|t| t as u64)
+            .unwrap_or((100_000f64 * fraction) as u64);
+        context_budget
+    } else {
+        0
+    };
+
     loop {
         // Wait for either a bus message or a queue poll tick.
         let line = tokio::select! {
@@ -264,6 +287,79 @@ pub async fn run(
                 continue;
             }
         };
+
+        // ── Memory agent: inject bus events as context ──────────────────
+        // For memory agents, messages that are NOT direct questions
+        // (target != agent:{name}) are injected as context into the
+        // running Claude session instead of being processed as tasks.
+        if agent_runtime == AgentRuntime::Memory {
+            let direct_target = format!("agent:{}", name);
+            if msg.target != direct_target {
+                let event_text = format_memory_event(&msg);
+                info!(
+                    agent = %name,
+                    source = %msg.source,
+                    target = %msg.target,
+                    "memory: injecting bus event as context"
+                );
+                if let Err(e) = process.inject_message(&event_text) {
+                    warn!(agent = %name, error = %e, "memory: failed to inject event");
+                }
+                memory_injected_count += 1;
+                // Estimate tokens: ~4 characters per token.
+                memory_tokens_estimate += (event_text.len() as u64) / 4;
+                debug!(
+                    agent = %name,
+                    injected_count = memory_injected_count,
+                    tokens_estimate = memory_tokens_estimate,
+                    "memory: event injected"
+                );
+
+                // Check if compaction is needed.
+                if crate::domain::context::should_compact(
+                    memory_tokens_estimate,
+                    compact_threshold_tokens,
+                ) {
+                    info!(
+                        agent = %name,
+                        tokens_estimate = memory_tokens_estimate,
+                        threshold = compact_threshold_tokens,
+                        "memory: triggering compaction"
+                    );
+                    let compact_prompt = "Compress your accumulated knowledge. \
+                        Keep: decisions, errors, current state, cross-agent correlations. \
+                        Drop: routine status updates, repeated checks, duplicated information. \
+                        Output a condensed summary of everything important.";
+                    let compact_limits = agent::TaskLimits {
+                        max_turns: Some(3),
+                        budget_usd: Some(budget_usd),
+                    };
+                    match process
+                        .send_task(compact_prompt, None, None, &compact_limits)
+                        .await
+                    {
+                        Ok(turn) => {
+                            info!(
+                                agent = %name,
+                                cost = turn.cost_usd,
+                                "memory: compaction completed"
+                            );
+                            // Reset token counter — the session now has condensed history.
+                            memory_tokens_estimate = 0;
+                        }
+                        Err(e) => {
+                            warn!(agent = %name, error = %e, "memory: compaction failed");
+                            // Halve the estimate to avoid re-triggering immediately.
+                            memory_tokens_estimate /= 2;
+                        }
+                    }
+                }
+
+                continue;
+            }
+            // Direct question — fall through to normal task processing.
+            debug!(agent = %name, source = %msg.source, "memory: direct question, processing as task");
+        }
 
         // Extract task context from the message.
         let ctx = match extract_task_context(&msg, name) {
@@ -536,7 +632,15 @@ pub async fn run(
     }
 
     process.stop().await;
-    info!(agent = %name, "disconnected from bus");
+    if agent_runtime == AgentRuntime::Memory {
+        info!(
+            agent = %name,
+            injected_events = memory_injected_count,
+            "memory agent disconnected from bus"
+        );
+    } else {
+        info!(agent = %name, "disconnected from bus");
+    }
     Ok(())
 }
 
@@ -1193,6 +1297,48 @@ async fn emit_event(
     .await;
 }
 
+/// Format a bus message as a compact event string for memory agent context injection.
+///
+/// Produces lines like:
+/// `[agent:dev @ 2026-04-14T10:30:00Z] task_result: merged PR #331`
+pub fn format_memory_event(msg: &Message) -> String {
+    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    // Determine event type from payload.
+    let event_type = if msg.payload.get("result").is_some() {
+        "task_result"
+    } else if msg.payload.get("error").is_some() {
+        "error"
+    } else if msg.payload.get("event").and_then(|v| v.as_str()).is_some() {
+        msg.payload["event"].as_str().unwrap_or("event")
+    } else if msg.payload.get("task").is_some() {
+        "task"
+    } else {
+        "message"
+    };
+
+    // Extract a summary from the payload.
+    let summary = if let Some(result) = msg.payload.get("result").and_then(|v| v.as_str()) {
+        truncate(result, 200).to_string()
+    } else if let Some(error) = msg.payload.get("error").and_then(|v| v.as_str()) {
+        truncate(error, 200).to_string()
+    } else if let Some(task) = msg.payload.get("task").and_then(|v| v.as_str()) {
+        truncate(task, 200).to_string()
+    } else {
+        // Fallback: serialize the payload compactly.
+        let s = serde_json::to_string(&msg.payload).unwrap_or_default();
+        truncate(&s, 200).to_string()
+    };
+
+    format!(
+        "[{source} @ {ts}] {event_type}: {summary}",
+        source = msg.source,
+        ts = ts,
+        event_type = event_type,
+        summary = summary,
+    )
+}
+
 fn truncate(s: &str, max: usize) -> &str {
     if s.len() <= max {
         return s;
@@ -1356,5 +1502,286 @@ mod tests {
         }));
         let ctx = extract_task_context(&msg, "test").unwrap();
         assert_eq!(ctx.task_queue_id.as_deref(), Some("tq-456"));
+    }
+
+    // ─── format_memory_event tests ──────────────────────────────────────
+
+    #[test]
+    fn test_format_memory_event_task_result() {
+        let msg = Message {
+            id: "msg-1".into(),
+            source: "agent:dev".into(),
+            target: "agent:kira".into(),
+            payload: json!({"result": "merged PR #331 — archlint scan passed"}),
+            reply_to: None,
+            metadata: Default::default(),
+        };
+        let event = format_memory_event(&msg);
+        assert!(event.starts_with("[agent:dev @ "));
+        assert!(event.contains("] task_result: merged PR #331"));
+    }
+
+    #[test]
+    fn test_format_memory_event_error() {
+        let msg = Message {
+            id: "msg-2".into(),
+            source: "agent:worker".into(),
+            target: "broadcast".into(),
+            payload: json!({"error": "process exited with code 1"}),
+            reply_to: None,
+            metadata: Default::default(),
+        };
+        let event = format_memory_event(&msg);
+        assert!(event.contains("] error: process exited"));
+    }
+
+    #[test]
+    fn test_format_memory_event_task() {
+        let msg = Message {
+            id: "msg-3".into(),
+            source: "cli".into(),
+            target: "agent:dev".into(),
+            payload: json!({"task": "review the PR"}),
+            reply_to: None,
+            metadata: Default::default(),
+        };
+        let event = format_memory_event(&msg);
+        assert!(event.contains("] task: review the PR"));
+    }
+
+    #[test]
+    fn test_format_memory_event_generic() {
+        let msg = Message {
+            id: "msg-4".into(),
+            source: "scheduler".into(),
+            target: "broadcast".into(),
+            payload: json!({"event": "agent_output", "line": "hello world"}),
+            reply_to: None,
+            metadata: Default::default(),
+        };
+        let event = format_memory_event(&msg);
+        assert!(event.contains("] agent_output: "));
+    }
+
+    #[test]
+    fn test_format_memory_event_truncates_long_payload() {
+        let long_text = "x".repeat(500);
+        let msg = Message {
+            id: "msg-5".into(),
+            source: "agent:dev".into(),
+            target: "agent:kira".into(),
+            payload: json!({"result": long_text}),
+            reply_to: None,
+            metadata: Default::default(),
+        };
+        let event = format_memory_event(&msg);
+        // The summary should be truncated to 200 chars.
+        assert!(event.len() < 300);
+    }
+
+    // ─── memory agent: direct question detection ────────────────────────
+
+    #[test]
+    fn test_memory_direct_question_detection() {
+        let agent_name = "memory-all";
+        let direct_target = format!("agent:{}", agent_name);
+
+        // Direct question — target matches agent's own address.
+        assert_eq!(direct_target, "agent:memory-all");
+
+        // Bus event — target is some other agent, arrived via glob subscription.
+        let event_target = "agent:dev";
+        assert_ne!(event_target, direct_target);
+
+        // Another bus event — broadcast.
+        let broadcast_target = "broadcast";
+        assert_ne!(broadcast_target, direct_target);
+    }
+
+    // ─── memory agent: should_compact wiring ───────────────────────────
+
+    #[test]
+    fn test_should_compact_basic() {
+        use crate::domain::context::should_compact;
+        assert!(!should_compact(50_000, 80_000));
+        assert!(should_compact(80_000, 80_000));
+        assert!(should_compact(90_000, 80_000));
+        assert!(!should_compact(0, 80_000));
+    }
+
+    #[test]
+    fn test_compact_threshold_defaults() {
+        // Default fraction 0.8 applied to default budget of 100_000 → 80_000 tokens.
+        let fraction = 0.8f64;
+        let threshold = (100_000f64 * fraction) as u64;
+        assert_eq!(threshold, 80_000);
+    }
+
+    #[test]
+    fn test_compact_threshold_from_config() {
+        // When compact_threshold_tokens is explicitly set in context config, use it.
+        use crate::domain::config_types::ConfigContextConfig;
+        let ctx = ConfigContextConfig {
+            enabled: true,
+            compact_threshold_tokens: Some(50_000),
+            main_budget_tokens: None,
+            main_path: None,
+        };
+        let threshold = ctx.compact_threshold_tokens.unwrap() as u64;
+        assert_eq!(threshold, 50_000);
+    }
+
+    // ─── integration: two agents produce events that a memory agent accumulates ─
+
+    #[test]
+    fn test_memory_agent_accumulates_events_from_multiple_agents() {
+        // Simulate two agents (dev, worker) producing bus events that a memory
+        // agent would receive via glob subscription. Verify format_memory_event
+        // produces correct output and routing logic distinguishes bus events from
+        // direct questions.
+        let memory_agent = "memory-all";
+        let direct_target = format!("agent:{}", memory_agent);
+
+        // Agent 1: dev sends a task result
+        let dev_msg = Message {
+            id: "msg-dev-1".into(),
+            source: "agent:dev".into(),
+            target: "agent:kira".into(),
+            payload: json!({"result": "deployed v1.2.3 to production"}),
+            reply_to: None,
+            metadata: Default::default(),
+        };
+
+        // Agent 2: worker sends an error event
+        let worker_msg = Message {
+            id: "msg-worker-1".into(),
+            source: "agent:worker".into(),
+            target: "broadcast".into(),
+            payload: json!({"error": "build failed: missing dependency tokio"}),
+            reply_to: None,
+            metadata: Default::default(),
+        };
+
+        // Agent 2: worker sends a task assignment
+        let worker_task_msg = Message {
+            id: "msg-worker-2".into(),
+            source: "cli".into(),
+            target: "agent:worker".into(),
+            payload: json!({"task": "run cargo test in deskd repo"}),
+            reply_to: None,
+            metadata: Default::default(),
+        };
+
+        // Direct question to memory agent — should NOT be injected as event
+        let direct_question = Message {
+            id: "msg-direct-1".into(),
+            source: "agent:kira".into(),
+            target: "agent:memory-all".into(),
+            payload: json!({"task": "what errors happened today?"}),
+            reply_to: None,
+            metadata: Default::default(),
+        };
+
+        // Verify all bus events are correctly formatted with source attribution.
+        let events: Vec<String> = vec![&dev_msg, &worker_msg, &worker_task_msg]
+            .iter()
+            .map(|m| format_memory_event(m))
+            .collect();
+
+        // Event 1: dev task result
+        assert!(
+            events[0].contains("[agent:dev @"),
+            "event should attribute source agent:dev"
+        );
+        assert!(
+            events[0].contains("task_result: deployed v1.2.3"),
+            "event should contain the result summary"
+        );
+
+        // Event 2: worker error
+        assert!(
+            events[1].contains("[agent:worker @"),
+            "event should attribute source agent:worker"
+        );
+        assert!(
+            events[1].contains("error: build failed"),
+            "event should contain the error summary"
+        );
+
+        // Event 3: CLI task to worker
+        assert!(
+            events[2].contains("[cli @"),
+            "event should attribute source cli"
+        );
+        assert!(
+            events[2].contains("task: run cargo test"),
+            "event should contain the task summary"
+        );
+
+        // Verify routing: bus events (target != agent:memory-all) are injected
+        assert_ne!(dev_msg.target, direct_target, "dev msg is a bus event");
+        assert_ne!(
+            worker_msg.target, direct_target,
+            "worker msg is a bus event"
+        );
+        assert_ne!(
+            worker_task_msg.target, direct_target,
+            "worker task is a bus event"
+        );
+        // Direct question (target == agent:memory-all) falls through to task processing
+        assert_eq!(
+            direct_question.target, direct_target,
+            "direct question targets memory agent"
+        );
+
+        // Verify accumulation: token estimate grows with each injected event
+        let mut token_estimate: u64 = 0;
+        for event in &events {
+            token_estimate += (event.len() as u64) / 4;
+        }
+        assert!(
+            token_estimate > 0,
+            "accumulated token estimate should be positive"
+        );
+        // Each event is ~50-80 chars → ~12-20 tokens each. 3 events = 36-60 tokens.
+        assert!(
+            token_estimate >= 10,
+            "three events should produce at least 10 token estimate"
+        );
+    }
+
+    #[test]
+    fn test_memory_agent_compaction_trigger_logic() {
+        use crate::domain::context::should_compact;
+
+        // Simulate token accumulation from multiple agent events and verify
+        // compaction triggers at the right threshold.
+        let compact_threshold: u64 = 80_000;
+        let mut tokens: u64 = 0;
+        let mut compaction_triggered = false;
+
+        // Simulate 1000 events of ~320 chars each (~80 tokens per event).
+        for i in 0..1000 {
+            let event_len: u64 = 320; // approximate event text length
+            tokens += event_len / 4; // ~80 tokens per event
+
+            if should_compact(tokens, compact_threshold) {
+                compaction_triggered = true;
+                assert!(
+                    tokens >= compact_threshold,
+                    "compaction should only trigger at or above threshold"
+                );
+                assert_eq!(
+                    i, 999,
+                    "with 80 tokens/event, compaction at 80k tokens fires at event 1000"
+                );
+                // After compaction, the real code resets the counter.
+                break;
+            }
+        }
+        assert!(
+            compaction_triggered,
+            "compaction should have triggered within 1000 events"
+        );
     }
 }

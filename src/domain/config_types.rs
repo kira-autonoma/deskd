@@ -27,6 +27,7 @@ pub enum ConfigAgentRuntime {
     #[default]
     Claude,
     Acp,
+    Memory,
 }
 
 impl From<ConfigSessionMode> for SessionMode {
@@ -52,6 +53,7 @@ impl From<ConfigAgentRuntime> for AgentRuntime {
         match dto {
             ConfigAgentRuntime::Claude => AgentRuntime::Claude,
             ConfigAgentRuntime::Acp => AgentRuntime::Acp,
+            ConfigAgentRuntime::Memory => AgentRuntime::Memory,
         }
     }
 }
@@ -61,6 +63,7 @@ impl From<&AgentRuntime> for ConfigAgentRuntime {
         match rt {
             AgentRuntime::Claude => ConfigAgentRuntime::Claude,
             AgentRuntime::Acp => ConfigAgentRuntime::Acp,
+            AgentRuntime::Memory => ConfigAgentRuntime::Memory,
         }
     }
 }
@@ -95,5 +98,26 @@ impl From<&ContextConfig> for ConfigContextConfig {
             compact_threshold_tokens: c.compact_threshold_tokens,
             main_path: c.main_path.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_agent_runtime_memory_roundtrip() {
+        let config_rt = ConfigAgentRuntime::Memory;
+        let domain_rt: AgentRuntime = config_rt.into();
+        assert_eq!(domain_rt, AgentRuntime::Memory);
+        let back: ConfigAgentRuntime = (&domain_rt).into();
+        assert_eq!(back, ConfigAgentRuntime::Memory);
+    }
+
+    #[test]
+    fn config_agent_runtime_serde() {
+        let yaml = "memory";
+        let rt: ConfigAgentRuntime = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(rt, ConfigAgentRuntime::Memory);
     }
 }

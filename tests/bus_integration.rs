@@ -227,3 +227,105 @@ async fn test_bus_list_clients() {
 
     let _ = std::fs::remove_file(&socket);
 }
+
+/// Integration test: two agents produce events, memory agent receives both via glob subscription.
+/// Verifies the full bus routing path that memory agents rely on for event injection.
+#[tokio::test]
+async fn test_memory_agent_receives_events_from_two_agents() {
+    let socket = temp_socket();
+
+    let sock = socket.clone();
+    tokio::spawn(async move {
+        deskd::app::bus::serve(&sock).await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Memory agent subscribes to agent:* (glob) — receives all agent-targeted messages.
+    let (mut memory_rx, _memory_tx) =
+        connect_and_register(&socket, "memory-all", &["agent:*"]).await;
+
+    // Two source agents.
+    let (_dev_rx, mut dev_tx) = connect_and_register(&socket, "dev", &[]).await;
+    let (_worker_rx, mut worker_tx) = connect_and_register(&socket, "worker", &[]).await;
+    // Allow registrations to be fully processed by the bus server.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Dev sends a task result to agent:kira.
+    send_message(
+        &mut dev_tx,
+        "dev",
+        "agent:kira",
+        serde_json::json!({"result": "deployed v1.2.3"}),
+    )
+    .await;
+
+    // Worker sends an error to agent:collab.
+    send_message(
+        &mut worker_tx,
+        "worker",
+        "agent:collab",
+        serde_json::json!({"error": "build failed: missing dep"}),
+    )
+    .await;
+
+    // Small delay to ensure messages are routed.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Memory agent should receive BOTH messages via agent:* glob.
+    let msg1 = read_one(&mut memory_rx, 2000).await;
+    assert!(
+        msg1.is_some(),
+        "memory agent should receive first event (from dev)"
+    );
+    let msg1 = msg1.unwrap();
+    assert_eq!(msg1["source"], "dev");
+
+    let msg2 = read_one(&mut memory_rx, 2000).await;
+    assert!(
+        msg2.is_some(),
+        "memory agent should receive second event (from worker)"
+    );
+    let msg2 = msg2.unwrap();
+    assert_eq!(msg2["source"], "worker");
+
+    // Verify format_memory_event works on the received messages.
+    use deskd::domain::message::{Message, Metadata};
+    let m1 = Message {
+        id: msg1["id"].as_str().unwrap_or("").into(),
+        source: msg1["source"].as_str().unwrap_or("").into(),
+        target: msg1["target"].as_str().unwrap_or("").into(),
+        payload: msg1["payload"].clone(),
+        reply_to: None,
+        metadata: Metadata::default(),
+    };
+    let m2 = Message {
+        id: msg2["id"].as_str().unwrap_or("").into(),
+        source: msg2["source"].as_str().unwrap_or("").into(),
+        target: msg2["target"].as_str().unwrap_or("").into(),
+        payload: msg2["payload"].clone(),
+        reply_to: None,
+        metadata: Metadata::default(),
+    };
+
+    let event1 = deskd::app::worker::format_memory_event(&m1);
+    let event2 = deskd::app::worker::format_memory_event(&m2);
+
+    assert!(
+        event1.contains("[dev @"),
+        "event1 should attribute source dev: {event1}"
+    );
+    assert!(
+        event1.contains("deployed v1.2.3"),
+        "event1 should contain result"
+    );
+    assert!(
+        event2.contains("[worker @"),
+        "event2 should attribute source worker: {event2}"
+    );
+    assert!(
+        event2.contains("build failed"),
+        "event2 should contain error"
+    );
+
+    let _ = std::fs::remove_file(&socket);
+}

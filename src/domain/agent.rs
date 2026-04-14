@@ -11,7 +11,7 @@ pub enum SessionMode {
     Ephemeral,
 }
 
-/// Agent runtime protocol: claude (default) or acp.
+/// Agent runtime protocol: claude (default), acp, or memory.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum AgentRuntime {
     /// Claude stream-json protocol (default).
@@ -19,6 +19,10 @@ pub enum AgentRuntime {
     Claude,
     /// Agent Client Protocol (ACP) — JSON-RPC 2.0 over stdin/stdout.
     Acp,
+    /// Memory agent — Claude executor with bus event accumulation.
+    /// Injects bus events as context into a long-running conversation.
+    /// Direct questions (target == agent:{name}) go through send_task().
+    Memory,
 }
 
 /// Domain-level representation of an agent with capabilities and status.
@@ -167,5 +171,12 @@ mod tests {
     #[test]
     fn default_runtime_is_claude() {
         assert_eq!(AgentRuntime::default(), AgentRuntime::Claude);
+    }
+
+    #[test]
+    fn memory_runtime_variant_exists() {
+        let rt = AgentRuntime::Memory;
+        assert_ne!(rt, AgentRuntime::Claude);
+        assert_ne!(rt, AgentRuntime::Acp);
     }
 }

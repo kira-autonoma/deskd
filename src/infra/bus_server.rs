@@ -61,6 +61,17 @@ impl BusState {
             } else {
                 warn!(target = %name, "no such agent on bus");
             }
+            // Also deliver to glob subscribers (e.g. memory agents with "agent:*").
+            for client in self.clients.values() {
+                if client.name != msg.source && client.name != name {
+                    for sub in &client.subscriptions {
+                        if sub.ends_with('*') && target.starts_with(&sub[..sub.len() - 1]) {
+                            let _ = client.tx.send(msg.clone());
+                            break;
+                        }
+                    }
+                }
+            }
         } else if target.starts_with("queue:") {
             for client in self.clients.values() {
                 if client.subscriptions.contains(target) && client.name != msg.source {

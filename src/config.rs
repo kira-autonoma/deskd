@@ -374,6 +374,14 @@ pub struct SubAgentDef {
     /// Per-agent context configuration (overrides global UserConfig.context).
     #[serde(default)]
     pub context: Option<ConfigContextConfig>,
+    /// Memory agent: context usage fraction (0.0–1.0) that triggers compaction.
+    /// Default: 0.8. Only used when runtime is `memory`.
+    #[serde(default)]
+    pub compact_threshold: Option<f64>,
+    /// Memory agent: compaction strategy name. Default: "smart".
+    /// Only used when runtime is `memory`.
+    #[serde(default)]
+    pub compact_strategy: Option<String>,
 }
 
 /// Telegram channel routing config in the per-user deskd.yaml.
@@ -916,5 +924,62 @@ context:
         let global = cfg.context.as_ref().unwrap();
         assert!(global.enabled);
         assert_eq!(global.main_path.as_deref(), Some("contexts/default.yaml"));
+    }
+
+    #[test]
+    fn test_sub_agent_memory_runtime() {
+        let yaml = r#"
+model: claude-sonnet-4-6
+system_prompt: "Test"
+
+agents:
+  - name: memory-all
+    model: claude-haiku-4-5
+    system_prompt: "You accumulate bus events as context."
+    subscribe:
+      - "agent:memory-all"
+      - "agent:*"
+    runtime: memory
+    compact_threshold: 0.75
+    compact_strategy: aggressive
+
+  - name: worker
+    model: claude-sonnet-4-6
+    system_prompt: "Worker"
+    subscribe:
+      - "agent:worker"
+"#;
+        let cfg: UserConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.agents[0].runtime, ConfigAgentRuntime::Memory);
+        assert_eq!(cfg.agents[0].compact_threshold, Some(0.75));
+        assert_eq!(
+            cfg.agents[0].compact_strategy.as_deref(),
+            Some("aggressive")
+        );
+        // Worker has default runtime (Claude).
+        assert_eq!(cfg.agents[1].runtime, ConfigAgentRuntime::Claude);
+        assert!(cfg.agents[1].compact_threshold.is_none());
+        assert!(cfg.agents[1].compact_strategy.is_none());
+    }
+
+    #[test]
+    fn test_sub_agent_memory_defaults() {
+        let yaml = r#"
+model: claude-sonnet-4-6
+system_prompt: "Test"
+
+agents:
+  - name: memory-all
+    model: claude-haiku-4-5
+    system_prompt: "Memory agent"
+    subscribe:
+      - "agent:*"
+    runtime: memory
+"#;
+        let cfg: UserConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.agents[0].runtime, ConfigAgentRuntime::Memory);
+        // Defaults are None — worker.rs applies the actual defaults.
+        assert!(cfg.agents[0].compact_threshold.is_none());
+        assert!(cfg.agents[0].compact_strategy.is_none());
     }
 }

@@ -71,6 +71,7 @@ fn make_config(name: &str) -> deskd::app::agent::AgentConfig {
         session: deskd::infra::dto::ConfigSessionMode::Ephemeral,
         runtime: deskd::infra::dto::ConfigAgentRuntime::Claude,
         context: None,
+        compact_threshold: None,
     }
 }
 

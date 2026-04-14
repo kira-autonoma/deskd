@@ -351,6 +351,7 @@ mod tests {
             session: ConfigSessionMode::default(),
             runtime: ConfigAgentRuntime::default(),
             context: None,
+            compact_threshold: None,
         };
 
         let extra_env = [("DESKD_BUS_SOCKET", "/home/test/.deskd/bus.sock")];
@@ -400,6 +401,7 @@ mod tests {
             session: ConfigSessionMode::default(),
             runtime: ConfigAgentRuntime::default(),
             context: None,
+            compact_threshold: None,
         };
         let cmd = build_command(&cfg, &[], &[]);
         let program = cmd.as_std().get_program().to_string_lossy().to_string();
@@ -422,6 +424,7 @@ mod tests {
             session: ConfigSessionMode::default(),
             runtime: ConfigAgentRuntime::default(),
             context: None,
+            compact_threshold: None,
         };
         let extra_env = [("DESKD_BUS_SOCKET", "/tmp/bus.sock")];
         let cmd = build_command(&cfg, &[], &extra_env);
