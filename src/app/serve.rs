@@ -5,7 +5,6 @@ use tracing::info;
 
 use crate::app::{adapters, agent, bus, bus_api, schedule, worker, workflow};
 use crate::config;
-use crate::infra::paths;
 
 /// Start per-agent buses and workers for all agents in workspace config.
 /// Each agent has its own isolated bus at {work_dir}/.deskd/bus.sock.
@@ -56,7 +55,7 @@ pub async fn serve(config_path: String) -> Result<()> {
 
         // Ensure {work_dir}/.deskd/ exists and is owned by the agent's unix user.
         let bus_dir = std::path::Path::new(&def.work_dir).join(".deskd");
-        paths::ensure_dir_owned(&bus_dir, def.unix_user.as_deref())?;
+        config::ensure_dir_owned(&bus_dir, def.unix_user.as_deref())?;
 
         // Start the agent's isolated bus.
         {
@@ -240,7 +239,7 @@ pub async fn serve(config_path: String) -> Result<()> {
             let sm_store = crate::app::statemachine::StateMachineStore::default_for_home();
             let task_store = crate::app::task::TaskStore::default_for_home();
             tokio::spawn(async move {
-                let bus_client = match crate::infra::unix_bus::UnixBus::connect(&bus).await {
+                let bus_client = match crate::app::bus::connect_bus(&bus).await {
                     Ok(b) => b,
                     Err(e) => {
                         tracing::error!(

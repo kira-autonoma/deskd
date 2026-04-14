@@ -11,7 +11,7 @@ use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use crate::infra::dto::BusMessage;
+use crate::ports::bus_wire::BusMessage;
 
 // --- MCP Protocol types ---
 

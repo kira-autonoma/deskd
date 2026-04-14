@@ -4,6 +4,7 @@
 //! `infra`, `app`, `adapters`, or any other outer layer.
 
 pub mod agent;
+pub mod config_types;
 pub mod context;
 pub mod events;
 pub mod message;

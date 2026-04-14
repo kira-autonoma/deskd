@@ -209,7 +209,7 @@ pub fn split_command(command: &[String]) -> (&str, &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::dto::{ConfigAgentRuntime, ConfigSessionMode};
+    use crate::domain::config_types::{ConfigAgentRuntime, ConfigSessionMode};
     use std::collections::HashMap;
 
     #[test]

@@ -12,7 +12,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
 use crate::config::{self, ContainerConfig, UserConfig};
-use crate::infra::dto::{ConfigAgentRuntime, ConfigContextConfig, ConfigSessionMode};
+use crate::domain::config_types::{ConfigAgentRuntime, ConfigContextConfig, ConfigSessionMode};
 
 use super::process_builder::{build_command, inject_required_flags};
 

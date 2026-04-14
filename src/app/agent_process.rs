@@ -9,7 +9,7 @@ use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tracing::{debug, error, info, warn};
 
-use crate::infra::dto::ConfigSessionMode;
+use crate::domain::config_types::ConfigSessionMode;
 use crate::ports::executor::{Executor, ProgressSink, TaskLimits, TokenUsage, TurnResult};
 
 use super::agent_registry::{
@@ -271,7 +271,7 @@ impl AgentProcess {
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| crate::app::context::default_main_path(&state.config.work_dir));
             if main_path.exists() {
-                let ctx_repo = crate::infra::context_store::FileContextStore::new();
+                let ctx_repo = crate::app::context::new_context_store();
                 match crate::app::context::MainBranch::load(&ctx_repo, &main_path) {
                     Ok(mut branch) => match branch.materialize().await {
                         Ok(messages) if !messages.is_empty() => {

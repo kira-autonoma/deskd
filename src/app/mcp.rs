@@ -20,7 +20,7 @@ use crate::app::mcp_protocol::{
 };
 use crate::app::mcp_tools::{self, InternalBus, build_send_message_description};
 use crate::config::UserConfig;
-use crate::infra::dto::BusMessage;
+use crate::ports::bus_wire::BusMessage;
 
 // ─── Main entry point ────────────────────────────────────────────────────────
 

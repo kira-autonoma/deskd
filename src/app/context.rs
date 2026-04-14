@@ -9,6 +9,13 @@ use crate::ports::store::ContextRepository;
 // Re-export all domain types for backward compatibility.
 pub use crate::domain::context::*;
 
+/// Create a new file-backed context store.
+///
+/// Application code should call this instead of importing `FileContextStore` from infra.
+pub fn new_context_store() -> impl ContextRepository {
+    crate::infra::context_store::FileContextStore::new()
+}
+
 impl MainBranch {
     /// Load from file via the given repository.
     pub fn load(repo: &dyn ContextRepository, path: &std::path::Path) -> anyhow::Result<Self> {
@@ -153,7 +160,7 @@ mod tests {
             tokens_estimate: 50,
         });
 
-        let repo = crate::infra::context_store::FileContextStore::new();
+        let repo = crate::app::context::new_context_store();
         branch.save(&repo, &path).expect("save failed");
         let loaded = MainBranch::load(&repo, &path).expect("load failed");
 
@@ -362,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_context_config_serde() {
-        use crate::infra::dto::ConfigContextConfig;
+        use crate::domain::config_types::ConfigContextConfig;
         let yaml = r#"
 enabled: true
 main_budget_tokens: 12000

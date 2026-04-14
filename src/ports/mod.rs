@@ -4,5 +4,6 @@
 //! infrastructure modules implement.
 
 pub mod bus;
+pub mod bus_wire;
 pub mod executor;
 pub mod store;

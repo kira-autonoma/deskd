@@ -137,7 +137,7 @@ pub async fn handle(
                     socket
                 });
                 if std::path::Path::new(&bus_socket).exists()
-                    && let Ok(bus) = crate::infra::unix_bus::UnixBus::connect(&bus_socket).await
+                    && let Ok(bus) = crate::app::bus::connect_bus(&bus_socket).await
                 {
                     let _ = bus.register("cli-sm-notify", &[]).await;
                     if let Err(e) = workflow::notify_moved(&bus, &id, "cli").await {

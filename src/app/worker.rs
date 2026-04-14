@@ -11,8 +11,8 @@ use crate::app::message::Message;
 use crate::app::tasklog;
 use crate::app::unified_inbox;
 use crate::domain::agent::AgentRuntime;
+use crate::domain::config_types::ConfigSessionMode;
 use crate::domain::events::DomainEvent;
-use crate::infra::dto::ConfigSessionMode;
 
 /// Create an executor for the given runtime type.
 ///
@@ -257,7 +257,7 @@ pub async fn run(
             continue;
         }
 
-        let msg: Message = match serde_json::from_str::<crate::infra::dto::BusMessage>(&line) {
+        let msg: Message = match serde_json::from_str::<crate::ports::bus_wire::BusMessage>(&line) {
             Ok(dto) => dto.into(),
             Err(e) => {
                 warn!(agent = %name, error = %e, "invalid message from bus");
@@ -442,7 +442,7 @@ pub async fn run(
                     if bus_line.is_empty() {
                         continue;
                     }
-                    if let Ok(dto) = serde_json::from_str::<crate::infra::dto::BusMessage>(&bus_line) {
+                    if let Ok(dto) = serde_json::from_str::<crate::ports::bus_wire::BusMessage>(&bus_line) {
                         let inject_msg: Message = dto.into();
                         let inject_task = inject_msg
                             .payload

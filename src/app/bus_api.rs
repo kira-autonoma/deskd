@@ -30,7 +30,6 @@ use tracing::{info, warn};
 
 use crate::app::mcp_service;
 use crate::config::UserConfig;
-use crate::infra::unix_bus::UnixBus;
 use crate::ports::bus::MessageBus;
 use crate::ports::store::{StateMachineRepository, TaskRepository};
 
@@ -47,7 +46,7 @@ pub async fn run(
     user_config: Option<&UserConfig>,
     agent_name: &str,
 ) -> Result<()> {
-    let bus = UnixBus::connect(bus_socket).await?;
+    let bus = crate::app::bus::connect_bus(bus_socket).await?;
     bus.register(
         API_CLIENT_NAME,
         &["deskd:query".to_string(), "deskd:command".to_string()],
@@ -699,7 +698,7 @@ async fn handle_send_message(params: &Value, bus_socket: &str, agent_name: &str)
         .unwrap_or(false);
 
     // Use a one-shot bus connection to send the message.
-    let sender = UnixBus::connect(bus_socket).await?;
+    let sender = crate::app::bus::connect_bus(bus_socket).await?;
     sender
         .register(&format!("{}-api-send", agent_name), &[])
         .await?;
@@ -980,7 +979,7 @@ async fn handle_agent_compress(params: &Value, bus_socket: &str, caller: &str) -
         .ok_or_else(|| anyhow::anyhow!("missing 'agent' parameter"))?;
 
     // Send a summarization task to the agent before restarting.
-    let sender = UnixBus::connect(bus_socket).await?;
+    let sender = crate::app::bus::connect_bus(bus_socket).await?;
     sender
         .register(&format!("{}-compress", caller), &[])
         .await?;

@@ -327,7 +327,7 @@ pub async fn sm_create(
     info!(agent = %agent_name, instance = %inst.id, model = %model_name, "sm_create");
 
     // Emit InstanceCreated event.
-    if let Ok(bus) = crate::infra::unix_bus::UnixBus::connect(bus_socket).await {
+    if let Ok(bus) = crate::app::bus::connect_bus(bus_socket).await {
         let _ = bus
             .register(&format!("{}-event-pub", agent_name), &[])
             .await;
@@ -438,7 +438,7 @@ pub async fn sm_move(
     info!(agent = %agent_name, instance = %id, from = %from, to = %state, "sm_move");
 
     // Emit TransitionApplied event and notify workflow engine via one-shot bus.
-    if let Ok(bus) = crate::infra::unix_bus::UnixBus::connect(bus_socket).await {
+    if let Ok(bus) = crate::app::bus::connect_bus(bus_socket).await {
         let _ = bus
             .register(&format!("{}-event-pub", agent_name), &[])
             .await;
@@ -479,7 +479,7 @@ pub fn sm_query(
 ) -> Result<Value> {
     if let Some(id) = id {
         let inst = sm_store.load(id)?;
-        let dto: crate::infra::dto::StoredInstance = (&inst).into();
+        let dto: crate::app::statemachine::StoredInstance = (&inst).into();
         return Ok(serde_json::to_value(&dto)?);
     }
 

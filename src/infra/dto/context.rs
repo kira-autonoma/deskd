@@ -2,42 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::context::{
-    CachedResult, ContextConfig, MainBranch, MaterializedMessage, Node, NodeKind,
-};
+use crate::domain::context::{CachedResult, MainBranch, MaterializedMessage, Node, NodeKind};
 
-// ─── Config format ──────────────────────────────────────────────────────────
-
-/// Config-level context configuration (serde for YAML parsing).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ConfigContextConfig {
-    pub enabled: bool,
-    pub main_budget_tokens: Option<u32>,
-    pub compact_threshold_tokens: Option<u32>,
-    pub main_path: Option<String>,
-}
-
-impl From<ConfigContextConfig> for ContextConfig {
-    fn from(dto: ConfigContextConfig) -> Self {
-        Self {
-            enabled: dto.enabled,
-            main_budget_tokens: dto.main_budget_tokens,
-            compact_threshold_tokens: dto.compact_threshold_tokens,
-            main_path: dto.main_path,
-        }
-    }
-}
-
-impl From<&ContextConfig> for ConfigContextConfig {
-    fn from(c: &ContextConfig) -> Self {
-        Self {
-            enabled: c.enabled,
-            main_budget_tokens: c.main_budget_tokens,
-            compact_threshold_tokens: c.compact_threshold_tokens,
-            main_path: c.main_path.clone(),
-        }
-    }
-}
+// Re-export config type from domain.
+pub use crate::domain::config_types::ConfigContextConfig;
 
 // ─── Persistence format ─────────────────────────────────────────────────────
 

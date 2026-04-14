@@ -194,7 +194,7 @@ async fn sweep_once(models: &[ModelDef], bus_socket: &str) -> anyhow::Result<()>
         );
 
         // Emit TaskTimedOut event.
-        if let Ok(bus) = crate::infra::unix_bus::UnixBus::connect(bus_socket).await {
+        if let Ok(bus) = crate::app::bus::connect_bus(bus_socket).await {
             let _ = bus.register("timeout-sweep-event-pub", &[]).await;
             let _ = workflow::publish_event(
                 &bus,

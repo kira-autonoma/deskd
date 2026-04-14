@@ -15,7 +15,7 @@ use crate::app::agent::{
 use crate::app::jsonrpc::{
     JsonRpcRequest, JsonRpcResponse, MessageKind, classify_message, parse_response,
 };
-use crate::infra::dto::ConfigSessionMode;
+use crate::domain::config_types::ConfigSessionMode;
 
 // ─── ACP message helpers ─────────────────────────────────────────────────────
 
