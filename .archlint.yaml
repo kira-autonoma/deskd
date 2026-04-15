@@ -9,12 +9,8 @@ rules:
     error_on_violation: false
     level: telemetry
     threshold: 6
-  layer_violations:
+  dip:
     enabled: true
     error_on_violation: false
     level: telemetry
-  dependency_inversion:
-    enabled: true
-    error_on_violation: false
-    level: telemetry
-# last reviewed: 2026-04-13
+# last reviewed: 2026-04-15
