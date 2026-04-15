@@ -3,7 +3,7 @@
 use anyhow::Result;
 use tracing::info;
 
-use crate::app::{adapters, agent, bus, bus_api, schedule, worker, workflow};
+use crate::app::{adapters, agent, bus, bus_api, config_watcher, schedule, worker, workflow};
 use crate::config;
 
 /// Start per-agent buses and workers for all agents in workspace config.
@@ -93,6 +93,17 @@ pub async fn serve(config_path: String) -> Result<()> {
                 schedule::watch_and_reload(config, bus, agent_name, home).await;
             });
             info!(agent = %name, "started schedule watcher");
+        }
+
+        // Start config watcher — hot-reloads system_prompt on deskd.yaml changes.
+        {
+            let bus = bus_socket.clone();
+            let agent_name = name.clone();
+            let config = cfg_path.clone();
+            tokio::spawn(async move {
+                config_watcher::watch_system_prompt(config, bus, agent_name).await;
+            });
+            info!(agent = %name, "started config watcher");
         }
 
         // Start reminder runner — fires one-shot reminders from ~/.deskd/reminders/.
