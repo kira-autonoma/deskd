@@ -62,6 +62,7 @@ mod tests {
             },
             label: "Greeting".into(),
             tokens_estimate: 100,
+            tags: Vec::new(),
         });
 
         store.save(&branch, &path).expect("save failed");

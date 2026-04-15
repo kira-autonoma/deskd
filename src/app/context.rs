@@ -119,6 +119,7 @@ mod tests {
             },
             label: "System prompt".into(),
             tokens_estimate: 500,
+            tags: Vec::new(),
         });
         branch.nodes.push(Node {
             id: "n2".into(),
@@ -128,6 +129,7 @@ mod tests {
             },
             label: "Governance".into(),
             tokens_estimate: 1200,
+            tags: Vec::new(),
         });
         assert_eq!(branch.total_tokens(), 1700);
     }
@@ -146,6 +148,7 @@ mod tests {
             },
             label: "Greeting".into(),
             tokens_estimate: 100,
+            tags: Vec::new(),
         });
         branch.nodes.push(Node {
             id: "l1".into(),
@@ -158,6 +161,7 @@ mod tests {
             },
             label: "Echo test".into(),
             tokens_estimate: 50,
+            tags: Vec::new(),
         });
 
         let repo = crate::app::context::new_context_store();
@@ -214,6 +218,7 @@ mod tests {
             },
             label: "System".into(),
             tokens_estimate: 100,
+            tags: Vec::new(),
         });
         branch.nodes.push(Node {
             id: "s2".into(),
@@ -223,6 +228,7 @@ mod tests {
             },
             label: "Context".into(),
             tokens_estimate: 50,
+            tags: Vec::new(),
         });
 
         let messages = branch.materialize().await.expect("materialize failed");
@@ -247,6 +253,7 @@ mod tests {
             },
             label: "Echo test".into(),
             tokens_estimate: 50,
+            tags: Vec::new(),
         });
 
         let messages = branch.materialize().await.expect("materialize failed");
@@ -269,6 +276,7 @@ mod tests {
             },
             label: "Cached echo".into(),
             tokens_estimate: 50,
+            tags: Vec::new(),
         });
 
         // First materialize — executes command
@@ -316,6 +324,7 @@ mod tests {
             },
             label: "Expiry test".into(),
             tokens_estimate: 50,
+            tags: Vec::new(),
         });
 
         let messages = branch.materialize().await.expect("materialize failed");
@@ -338,6 +347,7 @@ mod tests {
             },
             label: "Silent".into(),
             tokens_estimate: 10,
+            tags: Vec::new(),
         });
 
         let messages = branch.materialize().await.expect("materialize failed");

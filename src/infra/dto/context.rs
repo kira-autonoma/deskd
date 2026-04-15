@@ -24,6 +24,8 @@ pub struct StoredNode {
     pub kind: StoredNodeKind,
     pub label: String,
     pub tokens_estimate: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 /// Storage format for node kinds.
@@ -84,6 +86,7 @@ impl From<StoredNode> for Node {
             kind: dto.kind.into(),
             label: dto.label,
             tokens_estimate: dto.tokens_estimate,
+            tags: dto.tags,
         }
     }
 }
@@ -95,6 +98,7 @@ impl From<&Node> for StoredNode {
             kind: (&n.kind).into(),
             label: n.label.clone(),
             tokens_estimate: n.tokens_estimate,
+            tags: n.tags.clone(),
         }
     }
 }

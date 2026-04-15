@@ -220,20 +220,24 @@ pub async fn run(
 
     // Memory agent: cumulative token estimate for compaction trigger.
     let mut memory_tokens_estimate: u64 = 0;
-    // Compaction threshold in tokens. Derive from compact_threshold (fraction 0.0–1.0)
-    // applied to a default context budget of 100_000 tokens (conservative for most models).
-    let compact_threshold_tokens: u64 = if agent_runtime == AgentRuntime::Memory {
-        let fraction = initial_state.config.compact_threshold.unwrap_or(0.8);
-        let context_budget: u64 = initial_state
+
+    // Cumulative session input tokens — tracks actual token usage from Claude responses.
+    // Used to trigger compaction for all agent types (not just memory agents).
+    let mut session_input_tokens: u64 = 0;
+
+    // Compaction threshold in tokens. Derive from context config or compact_threshold
+    // fraction applied to a default context budget of 100_000 tokens.
+    let compact_threshold_tokens: u64 = {
+        let from_config = initial_state
             .config
             .context
             .as_ref()
             .and_then(|c| c.compact_threshold_tokens)
-            .map(|t| t as u64)
-            .unwrap_or((100_000f64 * fraction) as u64);
-        context_budget
-    } else {
-        0
+            .map(|t| t as u64);
+        from_config.unwrap_or_else(|| {
+            let fraction = initial_state.config.compact_threshold.unwrap_or(0.8);
+            (100_000f64 * fraction) as u64
+        })
     };
 
     loop {
@@ -596,6 +600,9 @@ pub async fn run(
 
         match result {
             Ok(ref turn) => {
+                // Track cumulative session input tokens for compaction trigger.
+                session_input_tokens += turn.token_usage.input_tokens;
+
                 handle_task_success(
                     name,
                     &msg,
@@ -610,6 +617,51 @@ pub async fn run(
                     task_store,
                 )
                 .await;
+
+                // Check compaction trigger for all agent types.
+                // Memory agents have their own injection-based trigger above;
+                // this covers regular agents hitting context limits from tasks.
+                if agent_runtime != AgentRuntime::Memory
+                    && crate::domain::context::should_compact(
+                        session_input_tokens,
+                        compact_threshold_tokens,
+                    )
+                {
+                    info!(
+                        agent = %name,
+                        session_input_tokens = session_input_tokens,
+                        threshold = compact_threshold_tokens,
+                        "session compaction triggered — requesting context condensation"
+                    );
+                    let compact_prompt = "Your context is approaching capacity. \
+                        Summarize everything important from this session: decisions made, \
+                        current state of work, errors encountered, and next steps. \
+                        Be thorough but concise — this summary will be your working memory.";
+                    let compact_limits = agent::TaskLimits {
+                        max_turns: Some(3),
+                        budget_usd: Some(budget_usd),
+                    };
+                    match process
+                        .send_task(compact_prompt, None, None, &compact_limits)
+                        .await
+                    {
+                        Ok(compact_turn) => {
+                            info!(
+                                agent = %name,
+                                cost = compact_turn.cost_usd,
+                                output_tokens = compact_turn.token_usage.output_tokens,
+                                "session compaction completed"
+                            );
+                            // Reset — the session now has condensed history.
+                            session_input_tokens = 0;
+                        }
+                        Err(e) => {
+                            warn!(agent = %name, error = %e, "session compaction failed");
+                            // Halve to avoid re-triggering immediately.
+                            session_input_tokens /= 2;
+                        }
+                    }
+                }
             }
             Err(ref e) => {
                 let needs_restart =
