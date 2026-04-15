@@ -525,6 +525,33 @@ fn handle_tools_list(
         }));
     }
 
+    // A2A tools
+    tools.push(json!({
+        "name": "a2a_send",
+        "description": "Send an A2A task to a remote agent. Requires the agent's base URL and skill ID.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Remote agent's base URL (e.g. https://archi.nassau.example.com)"},
+                "skill": {"type": "string", "description": "Skill ID to invoke (e.g. agent_name/skill_id)"},
+                "message": {"type": "string", "description": "Task description / message to send"},
+                "api_key": {"type": "string", "description": "API key for the remote agent (optional)"}
+            },
+            "required": ["url", "skill", "message"]
+        }
+    }));
+    tools.push(json!({
+        "name": "a2a_discover",
+        "description": "Fetch a remote agent's Agent Card (skills, needs, capabilities). Use to discover what a remote agent can do before sending tasks.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Remote agent's base URL (e.g. https://archi.nassau.example.com)"}
+            },
+            "required": ["url"]
+        }
+    }));
+
     Response::ok(id, json!({ "tools": tools }))
 }
 
@@ -572,6 +599,8 @@ async fn handle_tools_call(
         }
         "sm_query" => mcp_tools::call_sm_query(args, sm_store).await,
         "usage_stats" => mcp_tools::call_usage_stats(args).await,
+        "a2a_send" => mcp_tools::call_a2a_send(args).await,
+        "a2a_discover" => mcp_tools::call_a2a_discover(args).await,
         other => anyhow::bail!("Unknown tool: {}", other),
     }
 }

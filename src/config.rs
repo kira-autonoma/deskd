@@ -367,6 +367,9 @@ pub struct UserConfig {
     /// A2A skills advertised in the Agent Card.
     #[serde(default)]
     pub skills: Vec<SkillDef>,
+    /// A2A needs — what this agent wants done (Nassau extension to A2A spec).
+    #[serde(default)]
+    pub needs: Vec<NeedDef>,
 }
 
 /// An A2A skill advertised in the Agent Card (per A2A spec).
@@ -383,6 +386,26 @@ pub struct SkillDef {
     /// Tags for discovery (e.g. ["go", "rust"]).
     #[serde(default)]
     pub tags: Vec<String>,
+}
+
+/// An A2A need — what the agent wants done (Nassau extension).
+/// Defined in deskd.yaml under `needs:`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NeedDef {
+    /// Unique need identifier (e.g. "want-restart-button").
+    pub id: String,
+    /// Human-readable description of what's needed.
+    pub description: String,
+    /// Tags for discovery (e.g. ["ux", "telegram"]).
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Priority: "low", "medium", "high".
+    #[serde(default = "default_need_priority")]
+    pub priority: String,
+}
+
+fn default_need_priority() -> String {
+    "medium".to_string()
 }
 
 fn default_model() -> String {

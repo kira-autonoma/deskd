@@ -757,6 +757,98 @@ pub(crate) async fn call_usage_stats(args: &Value) -> Result<Value> {
     Ok(serde_json::to_value(stats)?)
 }
 
+/// Send an A2A task to a remote agent via HTTP.
+///
+/// MCP tool: `a2a_send(url, skill, message, api_key?)`
+pub(crate) async fn call_a2a_send(args: &Value) -> Result<Value> {
+    let url = args
+        .get("url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing 'url' parameter"))?;
+    let skill = args
+        .get("skill")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing 'skill' parameter"))?;
+    let message = args
+        .get("message")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing 'message' parameter"))?;
+    let api_key = args.get("api_key").and_then(|v| v.as_str());
+
+    let rpc_body = json!({
+        "jsonrpc": "2.0",
+        "id": uuid::Uuid::new_v4().to_string(),
+        "method": "tasks/send",
+        "params": {
+            "skill": skill,
+            "message": message,
+        }
+    });
+
+    let a2a_url = format!("{}/a2a", url.trim_end_matches('/'));
+
+    let client = reqwest::Client::new();
+    let mut req = client.post(&a2a_url).json(&rpc_body);
+    if let Some(key) = api_key {
+        req = req.header("x-api-key", key);
+    }
+
+    let resp = req.send().await.context("A2A request failed")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        bail!("A2A request returned {}: {}", status, body);
+    }
+
+    let body: Value = resp.json().await.context("failed to parse A2A response")?;
+
+    if let Some(error) = body.get("error") {
+        bail!(
+            "A2A error {}: {}",
+            error.get("code").and_then(|c| c.as_i64()).unwrap_or(0),
+            error
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown")
+        );
+    }
+
+    Ok(body.get("result").cloned().unwrap_or(body))
+}
+
+/// Fetch an Agent Card from a remote A2A agent (discovery).
+///
+/// MCP tool: `a2a_discover(url)`
+pub(crate) async fn call_a2a_discover(args: &Value) -> Result<Value> {
+    let url = args
+        .get("url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing 'url' parameter"))?;
+
+    let card_url = format!("{}/.well-known/agent-card.json", url.trim_end_matches('/'));
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(&card_url)
+        .send()
+        .await
+        .context("failed to fetch Agent Card")?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        bail!("Agent Card request returned {}: {}", status, body);
+    }
+
+    let card: Value = resp
+        .json()
+        .await
+        .context("failed to parse Agent Card JSON")?;
+
+    Ok(card)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

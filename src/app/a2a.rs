@@ -26,6 +26,9 @@ pub struct AgentCard {
     pub capabilities: AgentCapabilities,
     /// Skills this agent can perform.
     pub skills: Vec<AgentSkill>,
+    /// Needs — what this agent wants done (Nassau extension to A2A spec).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<AgentNeed>,
     /// Authentication schemes accepted.
     pub authentication: AgentAuthentication,
 }
@@ -49,6 +52,16 @@ pub struct AgentSkill {
     pub tags: Vec<String>,
 }
 
+/// A need the agent wants fulfilled (Nassau extension).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentNeed {
+    pub id: String,
+    pub description: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    pub priority: String,
+}
+
 /// Authentication schemes supported by this agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentAuthentication {
@@ -65,8 +78,9 @@ pub fn build_agent_card(workspace: &WorkspaceConfig) -> Result<AgentCard> {
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("workspace.yaml has no `a2a:` section"))?;
 
-    // Collect skills from each agent's deskd.yaml.
+    // Collect skills and needs from each agent's deskd.yaml.
     let mut skills = Vec::new();
+    let mut needs = Vec::new();
     for agent_def in &workspace.agents {
         let config_path = agent_def.config_path();
         let user_cfg = match UserConfig::load(&config_path) {
@@ -88,56 +102,12 @@ pub fn build_agent_card(workspace: &WorkspaceConfig) -> Result<AgentCard> {
                 tags: skill.tags.clone(),
             });
         }
-    }
-
-    let auth_schemes = if a2a.api_key.is_some() {
-        vec!["apiKey".to_string()]
-    } else {
-        vec![]
-    };
-
-    let name = a2a
-        .description
-        .as_deref()
-        .unwrap_or("deskd instance")
-        .to_string();
-
-    Ok(AgentCard {
-        name,
-        description: a2a.description.clone(),
-        url: a2a.url.clone(),
-        version: "0.1.0".to_string(),
-        capabilities: AgentCapabilities {
-            streaming: true,
-            push_notifications: false,
-        },
-        skills,
-        authentication: AgentAuthentication {
-            schemes: auth_schemes,
-        },
-    })
-}
-
-/// Build an Agent Card from workspace config + explicitly provided user configs.
-/// Used when user configs are already loaded (e.g., in tests or when configs
-/// are in non-standard locations).
-pub fn build_agent_card_with_configs(
-    workspace: &WorkspaceConfig,
-    agent_configs: &[(&str, &UserConfig)],
-) -> Result<AgentCard> {
-    let a2a = workspace
-        .a2a
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("workspace.yaml has no `a2a:` section"))?;
-
-    let mut skills = Vec::new();
-    for (agent_name, user_cfg) in agent_configs {
-        for skill in &user_cfg.skills {
-            skills.push(AgentSkill {
-                id: format!("{}/{}", agent_name, skill.id),
-                name: skill.name.clone(),
-                description: skill.description.clone(),
-                tags: skill.tags.clone(),
+        for need in &user_cfg.needs {
+            needs.push(AgentNeed {
+                id: format!("{}/{}", agent_def.name, need.id),
+                description: need.description.clone(),
+                tags: need.tags.clone(),
+                priority: need.priority.clone(),
             });
         }
     }
@@ -164,6 +134,69 @@ pub fn build_agent_card_with_configs(
             push_notifications: false,
         },
         skills,
+        needs,
+        authentication: AgentAuthentication {
+            schemes: auth_schemes,
+        },
+    })
+}
+
+/// Build an Agent Card from workspace config + explicitly provided user configs.
+/// Used when user configs are already loaded (e.g., in tests or when configs
+/// are in non-standard locations).
+pub fn build_agent_card_with_configs(
+    workspace: &WorkspaceConfig,
+    agent_configs: &[(&str, &UserConfig)],
+) -> Result<AgentCard> {
+    let a2a = workspace
+        .a2a
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("workspace.yaml has no `a2a:` section"))?;
+
+    let mut skills = Vec::new();
+    let mut needs = Vec::new();
+    for (agent_name, user_cfg) in agent_configs {
+        for skill in &user_cfg.skills {
+            skills.push(AgentSkill {
+                id: format!("{}/{}", agent_name, skill.id),
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+                tags: skill.tags.clone(),
+            });
+        }
+        for need in &user_cfg.needs {
+            needs.push(AgentNeed {
+                id: format!("{}/{}", agent_name, need.id),
+                description: need.description.clone(),
+                tags: need.tags.clone(),
+                priority: need.priority.clone(),
+            });
+        }
+    }
+
+    let auth_schemes = if a2a.api_key.is_some() {
+        vec!["apiKey".to_string()]
+    } else {
+        vec![]
+    };
+
+    let name = a2a
+        .description
+        .as_deref()
+        .unwrap_or("deskd instance")
+        .to_string();
+
+    Ok(AgentCard {
+        name,
+        description: a2a.description.clone(),
+        url: a2a.url.clone(),
+        version: "0.1.0".to_string(),
+        capabilities: AgentCapabilities {
+            streaming: true,
+            push_notifications: false,
+        },
+        skills,
+        needs,
         authentication: AgentAuthentication {
             schemes: auth_schemes,
         },
@@ -192,6 +225,17 @@ mod tests {
             api_key: Some("test-key".into()),
             listen: "0.0.0.0:3000".into(),
             description: Some("Dev workspace".into()),
+        }
+    }
+
+    fn make_user_config_with_needs(
+        skills: Vec<SkillDef>,
+        needs: Vec<crate::config::NeedDef>,
+    ) -> UserConfig {
+        UserConfig {
+            skills,
+            needs,
+            ..Default::default()
         }
     }
 
@@ -308,5 +352,47 @@ mod tests {
         let card = build_agent_card_with_configs(&workspace, &[]).unwrap();
         assert_eq!(card.name, "deskd instance");
         assert!(card.description.is_none());
+    }
+
+    #[test]
+    fn agent_card_with_needs() {
+        let workspace = make_workspace(vec![], Some(make_a2a_config()));
+        let user_cfg = make_user_config_with_needs(
+            vec![],
+            vec![
+                crate::config::NeedDef {
+                    id: "want-restart".into(),
+                    description: "Restart agent from Telegram".into(),
+                    tags: vec!["ux".into(), "telegram".into()],
+                    priority: "high".into(),
+                },
+                crate::config::NeedDef {
+                    id: "want-dashboard".into(),
+                    description: "Web dashboard for monitoring".into(),
+                    tags: vec!["ui".into()],
+                    priority: "medium".into(),
+                },
+            ],
+        );
+
+        let card = build_agent_card_with_configs(&workspace, &[("kira", &user_cfg)]).unwrap();
+        assert_eq!(card.needs.len(), 2);
+        assert_eq!(card.needs[0].id, "kira/want-restart");
+        assert_eq!(card.needs[0].priority, "high");
+        assert_eq!(card.needs[1].id, "kira/want-dashboard");
+        assert!(card.skills.is_empty());
+    }
+
+    #[test]
+    fn agent_card_needs_omitted_when_empty() {
+        let workspace = make_workspace(vec![], Some(make_a2a_config()));
+        let user_cfg = make_user_config(vec![]);
+        let card = build_agent_card_with_configs(&workspace, &[("dev", &user_cfg)]).unwrap();
+        assert!(card.needs.is_empty());
+        let json = serde_json::to_string(&card).unwrap();
+        assert!(
+            !json.contains("\"needs\""),
+            "empty needs should be omitted from JSON"
+        );
     }
 }

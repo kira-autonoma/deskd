@@ -278,6 +278,7 @@ mod tests {
                     description: "Code review".into(),
                     tags: vec!["rust".into()],
                 }],
+                needs: vec![],
                 authentication: crate::app::a2a::AgentAuthentication {
                     schemes: if api_key.is_some() {
                         vec!["apiKey".into()]
