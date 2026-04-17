@@ -56,7 +56,7 @@ pub struct WorkspaceConfig {
 /// A2A protocol configuration in workspace.yaml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct A2aConfig {
-    /// Public URL for this deskd instance (e.g. "https://dev.nassau.example.com").
+    /// Public URL for this deskd instance (e.g. "https://dev.agent.example.com").
     pub url: String,
     /// API key for authenticating incoming A2A requests.
     /// Typically set via ${A2A_API_KEY}.
@@ -382,7 +382,7 @@ pub struct UserConfig {
     /// A2A skills advertised in the Agent Card.
     #[serde(default)]
     pub skills: Vec<SkillDef>,
-    /// A2A needs — what this agent wants done (Nassau extension to A2A spec).
+    /// A2A needs — what this agent wants done (custom extension to A2A spec).
     #[serde(default)]
     pub needs: Vec<NeedDef>,
 }
@@ -403,7 +403,7 @@ pub struct SkillDef {
     pub tags: Vec<String>,
 }
 
-/// An A2A need — what the agent wants done (Nassau extension).
+/// An A2A need — what the agent wants done (custom extension).
 /// Defined in deskd.yaml under `needs:`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NeedDef {
@@ -751,12 +751,12 @@ agents:
 
 telegram:
   routes:
-    - chat_id: -1003733725513
-    - chat_id: -1003754811357
+    - chat_id: -1001234567890
+    - chat_id: -1001234567891
 
 schedules:
   - cron: "0 9 * * *"
-    target: "telegram.out:-1003733725513"
+    target: "telegram.out:-1001234567890"
     action: raw
 "#;
         let cfg: UserConfig = serde_yaml::from_str(yaml).unwrap();
@@ -765,7 +765,7 @@ schedules:
         assert_eq!(cfg.agents[0].subscribe, vec!["agent:dev"]);
         assert_eq!(cfg.agents[0].publish.as_ref().unwrap().len(), 2);
         assert!(cfg.agents[1].publish.is_none()); // allow all
-        assert_eq!(cfg.telegram.unwrap().routes[0].chat_id, -1003733725513);
+        assert_eq!(cfg.telegram.unwrap().routes[0].chat_id, -1001234567890);
         assert_eq!(cfg.schedules.len(), 1);
     }
 
@@ -879,9 +879,9 @@ agents:
         let yaml = r#"
 telegram:
   routes:
-    - chat_id: -1003733725513
+    - chat_id: -1001234567890
       name: "personal"
-    - chat_id: -1003754811357
+    - chat_id: -1001234567891
       name: "collab"
       mention_only: true
       route_to: "agent:collab"

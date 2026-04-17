@@ -58,7 +58,7 @@ All must be true to make archlint blocking:
 
 ---
 
-## Track 1: archlint fixes (Misha)
+## Track 1: archlint fixes (upstream maintainer)
 
 | Issue | What | Status | Blocker for CI? |
 |-------|------|--------|-----------------|
@@ -70,7 +70,7 @@ All must be true to make archlint blocking:
 | #97 | Layer enforcement not triggering | **Open** | **Yes** — 0 violations on known-bad code |
 | NEW | DIP exceptions for data types | Not filed | **Yes** — domain::message is pure data, no trait needed |
 
-**Minimum from Misha:** #94 (perf) + #97 (layer enforcement) + DIP data type exceptions.
+**Minimum from upstream maintainer:** #94 (perf) + #97 (layer enforcement) + DIP data type exceptions.
 
 ## Track 2: deskd refactoring (Kira)
 
@@ -115,7 +115,7 @@ All must be true to make archlint blocking:
 ## Sequence
 
 ```
-         Misha                    Kira                     We
+         upstream maintainer                    Kira                     We
            │                       │                        │
      #94 perf fix            #139 MessageBus trait          │
      #97 layer fix           #140 Store traits              │

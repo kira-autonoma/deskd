@@ -532,7 +532,7 @@ fn handle_tools_list(
         "inputSchema": {
             "type": "object",
             "properties": {
-                "url": {"type": "string", "description": "Remote agent's base URL (e.g. https://archi.nassau.example.com)"},
+                "url": {"type": "string", "description": "Remote agent's base URL (e.g. https://archi.agent.example.com)"},
                 "skill": {"type": "string", "description": "Skill ID to invoke (e.g. agent_name/skill_id)"},
                 "message": {"type": "string", "description": "Task description / message to send"},
                 "api_key": {"type": "string", "description": "API key for the remote agent (optional)"}
@@ -546,7 +546,7 @@ fn handle_tools_list(
         "inputSchema": {
             "type": "object",
             "properties": {
-                "url": {"type": "string", "description": "Remote agent's base URL (e.g. https://archi.nassau.example.com)"}
+                "url": {"type": "string", "description": "Remote agent's base URL (e.g. https://archi.agent.example.com)"}
             },
             "required": ["url"]
         }
@@ -570,7 +570,7 @@ fn handle_tools_list(
         "inputSchema": {
             "type": "object",
             "properties": {
-                "url": {"type": "string", "description": "Remote agent's base URL (e.g. https://archi.nassau.example.com)"}
+                "url": {"type": "string", "description": "Remote agent's base URL (e.g. https://archi.agent.example.com)"}
             },
             "required": ["url"]
         }

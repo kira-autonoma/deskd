@@ -111,7 +111,7 @@ max_turns: 100
 
 telegram:
   routes:
-    - chat_id: -1003563053115
+    - chat_id: -1001234567890
 
 agents: []
 schedules: []

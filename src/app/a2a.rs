@@ -26,7 +26,7 @@ pub struct AgentCard {
     pub capabilities: AgentCapabilities,
     /// Skills this agent can perform.
     pub skills: Vec<AgentSkill>,
-    /// Needs — what this agent wants done (Nassau extension to A2A spec).
+    /// Needs — what this agent wants done (custom extension to A2A spec).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<AgentNeed>,
     /// Authentication schemes accepted.
@@ -52,7 +52,7 @@ pub struct AgentSkill {
     pub tags: Vec<String>,
 }
 
-/// A need the agent wants fulfilled (Nassau extension).
+/// A need the agent wants fulfilled (custom extension).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentNeed {
     pub id: String,
@@ -238,7 +238,7 @@ mod tests {
 
     fn make_a2a_config() -> A2aConfig {
         A2aConfig {
-            url: "https://dev.nassau.example.com".into(),
+            url: "https://dev.agent.example.com".into(),
             api_key: Some("test-key".into()),
             listen: "0.0.0.0:3000".into(),
             description: Some("Dev workspace".into()),
@@ -287,7 +287,7 @@ mod tests {
         let card = build_agent_card_with_configs(&workspace, &[("dev", &user_cfg)]).unwrap();
 
         assert_eq!(card.name, "Dev workspace");
-        assert_eq!(card.url, "https://dev.nassau.example.com");
+        assert_eq!(card.url, "https://dev.agent.example.com");
         assert_eq!(card.skills.len(), 2);
         assert_eq!(card.skills[0].id, "dev/code-review");
         assert_eq!(card.skills[0].name, "Code Review");

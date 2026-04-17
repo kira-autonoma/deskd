@@ -63,8 +63,8 @@ Nodes can pull data from different source types:
 // Shell commands — execute any command, parse output
 { source: "shell:gh issue list --repo kgatilin/deskd --json number,title,state --jq '.[]'" }
 { source: "shell:gh pr list --repo kgatilin/deskd --state open --json number,title,headRefName" }
-{ source: "shell:git -C /home/dev/nassau/deskd log --oneline -10" }
-{ source: "shell:git -C /home/dev/nassau/deskd branch --list" }
+{ source: "shell:git -C /path/to/deskd log --oneline -10" }
+{ source: "shell:git -C /path/to/deskd branch --list" }
 { source: "shell:cat /home/dev/.deskd/reminders/*.json" }
 
 // HTTP endpoints
@@ -72,7 +72,7 @@ Nodes can pull data from different source types:
 { source: "http:https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFF" }
 
 // File watch — re-read on change
-{ source: "file:/home/dev/nassau/deskd/.archlint.yaml" }
+{ source: "file:/path/to/deskd/.archlint.yaml" }
 { source: "file:/home/dev/deskd.yaml" }
 ```
 
@@ -106,12 +106,12 @@ views:
         columns: [displayTitle, conclusion, event]
 
       - id: dirty_worktrees
-        source: "shell:git -C /home/dev/nassau/deskd worktree list --porcelain"
+        source: "shell:git -C /path/to/deskd worktree list --porcelain"
         poll: 30s
         render: text
 
       - id: archlint_health
-        source: "shell:cd /home/dev/nassau/archlint && go run ./cmd/archlint check /home/dev/nassau/deskd --format json"
+        source: "shell:cd /path/to/archlint && go run ./cmd/archlint check /path/to/deskd --format json"
         poll: 300s
         render: json
         highlight: [health, violations]
@@ -654,7 +654,7 @@ interface InboxMessage {
 │   type: message  id: msg-8a3f                                        │
 │   payload: {"task": "review PR #89 in kgatilin/deskd"}               │
 │                                                                       │
-│ 14:31:58.456  agent:reviewer → telegram.out:-1003563053115           │
+│ 14:31:58.456  agent:reviewer → telegram.out:-1001234567890           │
 │   type: message  id: msg-7b2e                                        │
 │   payload: {"text": "merged #88, tagged v0.9.2"}                     │
 │                                                                       │

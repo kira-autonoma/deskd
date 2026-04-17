@@ -379,7 +379,7 @@ impl Worker {
 | `forbidden_deps` | domain→infra prohibited | ❌ not supported → must add |
 | `perf` CC | Function complexity | main: CC=72→≤15 |
 
-### What archlint-rs needs (issues for Misha)
+### What archlint-rs needs (upstream issues)
 
 | Issue | What | Why |
 |-------|------|-----|
