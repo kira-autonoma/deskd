@@ -567,16 +567,28 @@ async fn polling_loop(
                         },
                         teloxide::types::ChatKind::Private(_) => "private",
                     };
-                    let in_whitelist = allowed.is_empty() || allowed.contains(&chat_id);
-                    let name = names.get(&chat_id).map(|s| s.as_str()).unwrap_or("(not configured)");
+                    let name = names
+                        .get(&chat_id)
+                        .map(|s| format!("\"{}\" (from route config)", s))
+                        .unwrap_or_else(|| "(not configured)".to_string());
                     let is_mention_only = mention_only.contains(&chat_id);
-                    let route = route_to_map.get(&chat_id).map(|s| s.as_str()).unwrap_or("default");
+                    let route_to_label = route_to_map
+                        .get(&chat_id)
+                        .map(|s| s.as_str())
+                        .unwrap_or("default");
+                    let route_to_detail = if route_to_label == "default" {
+                        format!("default (telegram.in:{})", chat_id)
+                    } else {
+                        route_to_label.to_string()
+                    };
                     let reply = format!(
-                        "📋 Channel Info\n─────────────\nChat ID: {}\nType: {}\nName: {}\nRouted: {}\nMention only: {}\nRoute to: {}\nAgent: {}",
-                        chat_id, chat_type, name,
-                        if in_whitelist { "yes" } else { "no ⚠️ add to deskd.yaml routes" },
+                        "📋 Channel Info\n─────────────\nChat ID: {}\nChat type: {}\nName: {}\nMention only: {}\nRoute to: {}\nAgent: {}",
+                        chat_id,
+                        chat_type,
+                        name,
                         if is_mention_only { "yes" } else { "no" },
-                        route, agent
+                        route_to_detail,
+                        agent
                     );
                     let _ = bot.send_message(msg.chat.id, reply).await;
                     return Ok(());
