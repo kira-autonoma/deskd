@@ -32,6 +32,17 @@ pub struct ReminderCreated {
 pub fn create_reminder(target: &str, message: &str, delay_minutes: f64) -> Result<ReminderCreated> {
     let fire_at =
         chrono::Utc::now() + chrono::Duration::seconds((delay_minutes * 60.0).round() as i64);
+    create_reminder_at(target, message, fire_at)
+}
+
+/// Create a one-shot reminder at a specific absolute time.
+pub fn create_reminder_at(
+    target: &str,
+    message: &str,
+    fire_at: chrono::DateTime<chrono::Utc>,
+) -> Result<ReminderCreated> {
+    let now = chrono::Utc::now();
+    let delay_minutes = (fire_at - now).num_seconds() as f64 / 60.0;
 
     let remind = crate::config::RemindDef {
         at: fire_at.to_rfc3339(),

@@ -316,7 +316,7 @@ fn handle_tools_list(
 
     tools.push(json!({
         "name": "create_reminder",
-        "description": "Schedule a one-shot reminder. The message will be posted to the bus target after delay_minutes minutes.",
+        "description": "Schedule a one-shot reminder. Specify time with 'at' (datetime/time string), 'in' (duration like 30m/1h/2h30m), or 'delay_minutes' (number). Exactly one time param required.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -328,12 +328,20 @@ fn handle_tools_list(
                     "type": "string",
                     "description": "Message payload to deliver when the reminder fires"
                 },
+                "at": {
+                    "type": "string",
+                    "description": "When to fire: ISO 8601 (2026-04-22T09:00:00Z), datetime (2026-04-22 09:00), time today/tomorrow (09:00), or 'tomorrow 09:00'. Moscow timezone assumed for naive times."
+                },
+                "in": {
+                    "type": "string",
+                    "description": "Duration from now: 30m, 1h, 2h30m, 90s, 1d"
+                },
                 "delay_minutes": {
                     "type": "number",
-                    "description": "Number of minutes from now to fire the reminder"
+                    "description": "Minutes from now (legacy, prefer 'at' or 'in')"
                 }
             },
-            "required": ["target", "message", "delay_minutes"]
+            "required": ["target", "message"]
         }
     }));
 

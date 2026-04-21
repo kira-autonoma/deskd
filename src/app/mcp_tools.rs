@@ -522,12 +522,27 @@ pub(crate) async fn call_create_reminder(args: &Value) -> Result<Value> {
         .get("message")
         .and_then(|m| m.as_str())
         .context("missing message")?;
-    let delay_minutes = args
-        .get("delay_minutes")
-        .and_then(|d| d.as_f64())
-        .context("missing delay_minutes")?;
 
-    let result = mcp_service::create_reminder(target, message, delay_minutes)?;
+    // Support three time specification modes (exactly one required):
+    // 1. "at" — ISO 8601 timestamp or human-friendly time string
+    // 2. "in" — duration string like "30m", "1h", "2h30m"
+    // 3. "delay_minutes" — legacy numeric minutes (backwards compat)
+    let at_str = args.get("at").and_then(|a| a.as_str());
+    let in_str = args.get("in").and_then(|i| i.as_str());
+    let delay_minutes = args.get("delay_minutes").and_then(|d| d.as_f64());
+
+    let result = if let Some(at) = at_str {
+        let fire_at = parse_at_time(at)?;
+        mcp_service::create_reminder_at(target, message, fire_at)?
+    } else if let Some(dur) = in_str {
+        let secs = crate::app::commands::parse_duration_secs(dur)?;
+        let delay = secs as f64 / 60.0;
+        mcp_service::create_reminder(target, message, delay)?
+    } else if let Some(mins) = delay_minutes {
+        mcp_service::create_reminder(target, message, mins)?
+    } else {
+        bail!("create_reminder requires one of: 'at', 'in', or 'delay_minutes'");
+    };
 
     Ok(json!({
         "content": [{
@@ -539,6 +554,70 @@ pub(crate) async fn call_create_reminder(args: &Value) -> Result<Value> {
         }],
         "isError": false
     }))
+}
+
+/// Parse a human-friendly time string into a UTC DateTime.
+///
+/// Supported formats:
+/// - ISO 8601: "2026-04-22T09:00:00Z", "2026-04-22T09:00:00+03:00"
+/// - Date + time: "2026-04-22 09:00"
+/// - Time only (today/tomorrow): "09:00", "9:00", "21:30"
+/// - Relative: "tomorrow 09:00", "tomorrow 9:00"
+fn parse_at_time(s: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    use chrono::{NaiveTime, TimeZone, Utc};
+    use chrono_tz::Europe::Moscow;
+
+    let s = s.trim();
+
+    // Try ISO 8601 with timezone offset first.
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+
+    // Try "YYYY-MM-DD HH:MM" or "YYYY-MM-DDTHH:MM" (naive, assume Moscow tz).
+    for fmt in &["%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M:%S"] {
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(s, fmt)
+            && let Some(dt) = Moscow.from_local_datetime(&naive).earliest()
+        {
+            return Ok(dt.with_timezone(&Utc));
+        }
+    }
+
+    // "tomorrow HH:MM" or "tomorrow H:MM"
+    if let Some(time_part) = s.strip_prefix("tomorrow").map(str::trim)
+        && let Ok(time) = NaiveTime::parse_from_str(time_part, "%H:%M")
+    {
+        let tomorrow_moscow =
+            (Utc::now().with_timezone(&Moscow).date_naive()) + chrono::Duration::days(1);
+        let naive = tomorrow_moscow.and_time(time);
+        if let Some(dt) = Moscow.from_local_datetime(&naive).earliest() {
+            return Ok(dt.with_timezone(&Utc));
+        }
+    }
+
+    // Bare time "HH:MM" or "H:MM" — today if in the future, tomorrow if past.
+    if let Ok(time) = NaiveTime::parse_from_str(s, "%H:%M") {
+        let now_moscow = Utc::now().with_timezone(&Moscow);
+        let today = now_moscow.date_naive().and_time(time);
+        if let Some(dt) = Moscow.from_local_datetime(&today).earliest() {
+            let dt_utc = dt.with_timezone(&Utc);
+            if dt_utc > Utc::now() {
+                return Ok(dt_utc);
+            }
+        }
+        // Time is past today — schedule for tomorrow.
+        let tomorrow = (now_moscow.date_naive() + chrono::Duration::days(1)).and_time(time);
+        if let Some(dt) = Moscow.from_local_datetime(&tomorrow).earliest() {
+            return Ok(dt.with_timezone(&Utc));
+        }
+    }
+
+    bail!(
+        "cannot parse time '{}'. Supported: ISO 8601 (2026-04-22T09:00:00Z), \
+         datetime (2026-04-22 09:00), time (09:00), 'tomorrow 09:00', \
+         or duration with 'in' param (30m, 1h, 2h30m)",
+        s
+    )
 }
 
 // ─── Unified inbox ───────────────────────────────────────────────────────────
@@ -1623,4 +1702,61 @@ agents:
         assert!(sub.work_dir.is_none());
         assert!(sub.env.is_none());
     }
+
+    // ─── parse_at_time tests ────────────────────────────────────────────────
+
+    #[test]
+    fn parse_at_iso8601() {
+        let dt = parse_at_time("2026-04-22T09:00:00Z").unwrap();
+        assert_eq!(dt.hour(), 9);
+        assert_eq!(dt.day(), 22);
+    }
+
+    #[test]
+    fn parse_at_iso8601_with_offset() {
+        let dt = parse_at_time("2026-04-22T12:00:00+03:00").unwrap();
+        // 12:00 MSK = 09:00 UTC
+        assert_eq!(dt.hour(), 9);
+    }
+
+    #[test]
+    fn parse_at_datetime_naive() {
+        let dt = parse_at_time("2026-04-22 09:00").unwrap();
+        // 09:00 Moscow = 06:00 UTC
+        assert_eq!(dt.hour(), 6);
+        assert_eq!(dt.day(), 22);
+    }
+
+    #[test]
+    fn parse_at_datetime_naive_with_t() {
+        let dt = parse_at_time("2026-04-22T09:00").unwrap();
+        assert_eq!(dt.hour(), 6); // 09:00 MSK = 06:00 UTC
+    }
+
+    #[test]
+    fn parse_at_tomorrow() {
+        let dt = parse_at_time("tomorrow 09:00").unwrap();
+        let now = chrono::Utc::now();
+        // Should be in the future.
+        assert!(dt > now);
+        // Hour in UTC: 09:00 Moscow = 06:00 UTC.
+        assert_eq!(dt.hour(), 6);
+    }
+
+    #[test]
+    fn parse_at_bare_time_future() {
+        // Use a time that's definitely in the future (23:59 Moscow).
+        let dt = parse_at_time("23:59").unwrap();
+        // 23:59 Moscow = 20:59 UTC
+        assert_eq!(dt.hour(), 20);
+        assert_eq!(dt.minute(), 59);
+    }
+
+    #[test]
+    fn parse_at_invalid() {
+        assert!(parse_at_time("not a time").is_err());
+        assert!(parse_at_time("").is_err());
+    }
+
+    use chrono::{Datelike, Timelike};
 }
