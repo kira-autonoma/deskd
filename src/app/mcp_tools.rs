@@ -462,20 +462,78 @@ pub(crate) async fn call_create_reminder(args: &Value) -> Result<Value> {
 
 // ─── Unified inbox ───────────────────────────────────────────────────────────
 
-pub(crate) async fn call_list_inboxes() -> Result<Value> {
-    let summary = mcp_service::list_inboxes()?;
+/// Check if `agent_name` is allowed to access `inbox_name`.
+///
+/// Rules:
+/// - An agent can always read its own inbox (name matches agent_name).
+/// - If the agent is a sub-agent with `inbox_read` configured, check the
+///   glob patterns in that allow-list.
+/// - If `inbox_read` is None (not configured), only own inbox is allowed.
+/// - Top-level agents (not in user_config.agents) have unrestricted access.
+fn inbox_access_allowed(
+    agent_name: &str,
+    inbox_name: &str,
+    user_config: Option<&UserConfig>,
+) -> bool {
+    // Own inbox is always allowed.
+    if inbox_name == agent_name {
+        return true;
+    }
+
+    // If this agent is a sub-agent with inbox_read ACL, check it.
+    if let Some(cfg) = user_config
+        && let Some(sub) = cfg.agents.iter().find(|a| a.name == agent_name)
+    {
+        return match &sub.inbox_read {
+            Some(patterns) => patterns.iter().any(|p| glob_match(p, inbox_name)),
+            None => false, // No inbox_read → own inbox only
+        };
+    }
+
+    // Top-level agent (not a sub-agent) → unrestricted.
+    true
+}
+
+pub(crate) async fn call_list_inboxes(
+    agent_name: &str,
+    user_config: Option<&UserConfig>,
+) -> Result<Value> {
+    let all = mcp_service::list_inboxes()?;
+    let filtered: Vec<_> = all
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .get("inbox")
+                .and_then(|v| v.as_str())
+                .map(|name| inbox_access_allowed(agent_name, name, user_config))
+                .unwrap_or(false)
+        })
+        .collect();
 
     Ok(json!({
-        "content": [{"type": "text", "text": serde_json::to_string_pretty(&summary)?}],
+        "content": [{"type": "text", "text": serde_json::to_string_pretty(&filtered)?}],
         "isError": false
     }))
 }
 
-pub(crate) async fn call_read_inbox(args: &Value) -> Result<Value> {
+pub(crate) async fn call_read_inbox(
+    args: &Value,
+    agent_name: &str,
+    user_config: Option<&UserConfig>,
+) -> Result<Value> {
     let inbox = args
         .get("inbox")
         .and_then(|i| i.as_str())
         .context("missing inbox")?;
+
+    if !inbox_access_allowed(agent_name, inbox, user_config) {
+        bail!(
+            "read_inbox: agent '{}' is not allowed to read inbox '{}'",
+            agent_name,
+            inbox
+        );
+    }
+
     let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(50) as usize;
     let since = args
         .get("since")
@@ -491,7 +549,11 @@ pub(crate) async fn call_read_inbox(args: &Value) -> Result<Value> {
     }))
 }
 
-pub(crate) async fn call_search_inbox(args: &Value) -> Result<Value> {
+pub(crate) async fn call_search_inbox(
+    args: &Value,
+    agent_name: &str,
+    user_config: Option<&UserConfig>,
+) -> Result<Value> {
     let inbox = args.get("inbox").and_then(|i| i.as_str());
     let query = args
         .get("query")
@@ -499,7 +561,37 @@ pub(crate) async fn call_search_inbox(args: &Value) -> Result<Value> {
         .context("missing query")?;
     let limit = args.get("limit").and_then(|l| l.as_u64()).unwrap_or(50) as usize;
 
-    let output = mcp_service::search_inbox(inbox, query, limit)?;
+    // If a specific inbox is requested, check access.
+    if let Some(name) = inbox
+        && !inbox_access_allowed(agent_name, name, user_config)
+    {
+        bail!(
+            "search_inbox: agent '{}' is not allowed to search inbox '{}'",
+            agent_name,
+            name
+        );
+    }
+
+    // When searching all inboxes (inbox=None), filter results to allowed inboxes.
+    // The mcp_service returns results tagged with inbox names, but the current
+    // unified_inbox search doesn't expose per-result inbox names. For cross-inbox
+    // search without ACL filtering, we restrict to the agent's own inbox.
+    let effective_inbox = if inbox.is_some() {
+        inbox
+    } else {
+        // If the agent is a sub-agent, restrict cross-inbox search to own inbox.
+        if let Some(cfg) = user_config {
+            if cfg.agents.iter().any(|a| a.name == agent_name) {
+                Some(agent_name)
+            } else {
+                None // Top-level agent — search all
+            }
+        } else {
+            None
+        }
+    };
+
+    let output = mcp_service::search_inbox(effective_inbox, query, limit)?;
 
     Ok(json!({
         "content": [{"type": "text", "text": serde_json::to_string_pretty(&output)?}],
@@ -1232,5 +1324,64 @@ mod tests {
             .unwrap_err();
         let msg = format!("{:#}", err);
         assert!(msg.contains("limit"), "expected limit error, got: {}", msg);
+    }
+
+    // ─── inbox ACL tests ────────────────────────────────────────────────
+
+    fn make_config_with_sub_agent(name: &str, inbox_read: Option<Vec<String>>) -> UserConfig {
+        let inbox_yaml = match &inbox_read {
+            Some(patterns) => {
+                let items: Vec<String> = patterns.iter().map(|p| format!("\"{}\"", p)).collect();
+                format!("    inbox_read: [{}]\n", items.join(", "))
+            }
+            None => String::new(),
+        };
+        let yaml = format!(
+            "agents:\n  - name: {}\n    model: haiku\n    subscribe: []\n{}",
+            name, inbox_yaml
+        );
+        serde_yaml::from_str(&yaml).expect("test config should parse")
+    }
+
+    #[test]
+    fn inbox_acl_allows_own_inbox() {
+        // Sub-agent can always read its own inbox, even without inbox_read.
+        let cfg = make_config_with_sub_agent("reader", None);
+        assert!(inbox_access_allowed("reader", "reader", Some(&cfg)));
+    }
+
+    #[test]
+    fn inbox_acl_denies_other_inbox_by_default() {
+        // Sub-agent with no inbox_read cannot read other inboxes.
+        let cfg = make_config_with_sub_agent("reader", None);
+        assert!(!inbox_access_allowed("reader", "secret", Some(&cfg)));
+    }
+
+    #[test]
+    fn inbox_acl_allows_listed_inbox() {
+        let cfg =
+            make_config_with_sub_agent("reader", Some(vec!["shared".into(), "collab-*".into()]));
+        assert!(inbox_access_allowed("reader", "shared", Some(&cfg)));
+        assert!(inbox_access_allowed("reader", "collab-daily", Some(&cfg)));
+        assert!(inbox_access_allowed("reader", "reader", Some(&cfg))); // own always ok
+    }
+
+    #[test]
+    fn inbox_acl_denies_unlisted_inbox() {
+        let cfg = make_config_with_sub_agent("reader", Some(vec!["shared".into()]));
+        assert!(!inbox_access_allowed("reader", "secret", Some(&cfg)));
+    }
+
+    #[test]
+    fn inbox_acl_top_level_agent_unrestricted() {
+        // Agent not in user_config.agents → top-level → unrestricted.
+        let cfg = make_config_with_sub_agent("other-agent", None);
+        assert!(inbox_access_allowed("top-level", "anything", Some(&cfg)));
+    }
+
+    #[test]
+    fn inbox_acl_no_config_unrestricted() {
+        // No user_config at all → unrestricted.
+        assert!(inbox_access_allowed("agent", "any-inbox", None));
     }
 }

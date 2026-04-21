@@ -451,6 +451,11 @@ pub struct SubAgentDef {
     /// Optional allow-list of targets this agent can publish to.
     /// If None, publish to any target is allowed.
     pub publish: Option<Vec<String>>,
+    /// Optional allow-list of inboxes this agent can read (glob patterns).
+    /// If None, the agent can only read its own inbox (matching its name).
+    /// Example: `["kira", "collab-*"]` allows reading the `kira` inbox and
+    /// any inbox starting with `collab-`.
+    pub inbox_read: Option<Vec<String>>,
     /// Session mode: persistent (default) or ephemeral.
     /// Ephemeral agents start a fresh session for each task.
     #[serde(default)]

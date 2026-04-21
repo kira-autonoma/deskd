@@ -650,9 +650,9 @@ async fn handle_tools_call(
             mcp_tools::call_add_persistent_agent(args, agent_name, bus_socket, internal_bus).await
         }
         "create_reminder" => mcp_tools::call_create_reminder(args).await,
-        "list_inboxes" => mcp_tools::call_list_inboxes().await,
-        "read_inbox" => mcp_tools::call_read_inbox(args).await,
-        "search_inbox" => mcp_tools::call_search_inbox(args).await,
+        "list_inboxes" => mcp_tools::call_list_inboxes(agent_name, user_config).await,
+        "read_inbox" => mcp_tools::call_read_inbox(args, agent_name, user_config).await,
+        "search_inbox" => mcp_tools::call_search_inbox(args, agent_name, user_config).await,
         "run_graph" => mcp_tools::call_run_graph(args).await,
         "task_create" => mcp_tools::call_task_create(args, agent_name, task_store).await,
         "task_list" => mcp_tools::call_task_list(args, task_store).await,
