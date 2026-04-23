@@ -13,4 +13,4 @@ rules:
     enabled: true
     error_on_violation: false
     level: telemetry
-# last reviewed: 2026-04-21
+# last reviewed: 2026-04-23
