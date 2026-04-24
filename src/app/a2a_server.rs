@@ -15,7 +15,7 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::app::a2a::AgentCard;
@@ -23,6 +23,11 @@ use crate::app::a2a::AgentCard;
 /// Default capacity for the in-memory A2A task registry.
 /// Older tasks are evicted in FIFO order once the cap is reached.
 const DEFAULT_TASK_REGISTRY_CAPACITY: usize = 1024;
+
+/// Default TTL after which a task stuck in `working` is auto-expired.
+/// Chosen so typical long-running skills complete well within the window,
+/// while abandoned tasks do not linger indefinitely.
+const DEFAULT_TASK_TTL_SECS: i64 = 3600;
 
 /// One row in the A2A task registry, tracking a task accepted via `tasks/send`.
 ///
@@ -46,9 +51,16 @@ pub struct A2aTaskRecord {
 /// `capacity` is reached, the oldest entry is dropped. Shared state is guarded
 /// by a single `Mutex` — contention is low since the registry is only touched
 /// on the task RPC hot path.
+///
+/// Tasks stuck in `working` are auto-expired after `ttl`. Because the bus
+/// layer is fire-and-forget, there is no completion signal for `tasks/send`;
+/// the TTL sweep prevents abandoned tasks from appearing active forever. The
+/// sweep is invoked opportunistically on every registry operation, so no
+/// background task is required.
 pub struct A2aTaskRegistry {
     inner: Mutex<RegistryInner>,
     capacity: usize,
+    ttl: Duration,
 }
 
 struct RegistryInner {
@@ -58,18 +70,27 @@ struct RegistryInner {
 
 impl A2aTaskRegistry {
     pub fn new(capacity: usize) -> Self {
+        Self::with_ttl(capacity, Duration::seconds(DEFAULT_TASK_TTL_SECS))
+    }
+
+    /// Construct a registry with a custom TTL. A non-positive `ttl` disables
+    /// expiration entirely (tasks remain `working` until explicitly cancelled
+    /// or evicted by the FIFO cap).
+    pub fn with_ttl(capacity: usize, ttl: Duration) -> Self {
         Self {
             inner: Mutex::new(RegistryInner {
                 tasks: HashMap::new(),
                 order: VecDeque::new(),
             }),
             capacity: capacity.max(1),
+            ttl,
         }
     }
 
     /// Insert a freshly-created task. Evicts the oldest entry when full.
     pub fn insert(&self, record: A2aTaskRecord) {
         let mut inner = self.inner.lock().expect("A2A registry mutex poisoned");
+        sweep_expired(&mut inner, Utc::now(), self.ttl);
         if inner.tasks.len() >= self.capacity
             && let Some(oldest) = inner.order.pop_front()
         {
@@ -81,7 +102,8 @@ impl A2aTaskRegistry {
 
     /// Return a clone of the task record, if present.
     pub fn get(&self, task_id: &str) -> Option<A2aTaskRecord> {
-        let inner = self.inner.lock().expect("A2A registry mutex poisoned");
+        let mut inner = self.inner.lock().expect("A2A registry mutex poisoned");
+        sweep_expired(&mut inner, Utc::now(), self.ttl);
         inner.tasks.get(task_id).cloned()
     }
 
@@ -89,6 +111,7 @@ impl A2aTaskRegistry {
     /// Returns the updated record, or `None` if the task is unknown.
     pub fn set_status(&self, task_id: &str, status: &str) -> Option<A2aTaskRecord> {
         let mut inner = self.inner.lock().expect("A2A registry mutex poisoned");
+        sweep_expired(&mut inner, Utc::now(), self.ttl);
         let record = inner.tasks.get_mut(task_id)?;
         record.status = status.to_string();
         record.updated_at = Utc::now();
@@ -99,6 +122,22 @@ impl A2aTaskRegistry {
 impl Default for A2aTaskRegistry {
     fn default() -> Self {
         Self::new(DEFAULT_TASK_REGISTRY_CAPACITY)
+    }
+}
+
+/// Flip `working` records whose `updated_at` is older than `now - ttl` to
+/// `expired`. Other statuses (`cancelled`, `expired`, future terminal states)
+/// are left alone so once a task reaches a terminal state its timestamp is
+/// preserved. A non-positive TTL is treated as "no expiration".
+fn sweep_expired(inner: &mut RegistryInner, now: DateTime<Utc>, ttl: Duration) {
+    if ttl <= Duration::zero() {
+        return;
+    }
+    for record in inner.tasks.values_mut() {
+        if record.status == "working" && now - record.updated_at > ttl {
+            record.status = "expired".to_string();
+            record.updated_at = now;
+        }
     }
 }
 
@@ -295,9 +334,10 @@ async fn handle_tasks_send(
 /// tasks/get — look up a task in the in-memory registry.
 ///
 /// Returns the current record for tasks that were accepted by this server via
-/// `tasks/send`. Tasks remain in `working` until explicitly cancelled or
-/// evicted by the registry's FIFO cap. Unknown task IDs return a -32002
-/// "task not found" error, per the A2A convention.
+/// `tasks/send`. Tasks remain in `working` until explicitly cancelled, aged
+/// past the registry TTL (auto-flipped to `expired`), or evicted by the FIFO
+/// cap. Unknown task IDs return a -32002 "task not found" error, per the A2A
+/// convention.
 fn handle_tasks_get(
     id: Option<serde_json::Value>,
     params: &serde_json::Value,
@@ -664,6 +704,80 @@ mod tests {
         assert_eq!(updated.status, "cancelled");
         assert!(updated.updated_at >= before.updated_at);
         assert!(reg.set_status("unknown", "cancelled").is_none());
+    }
+
+    /// Helper: build a record whose `updated_at` is `age_secs` in the past.
+    fn make_stale_record(id: &str, age_secs: i64) -> A2aTaskRecord {
+        let old = Utc::now() - Duration::seconds(age_secs);
+        A2aTaskRecord {
+            task_id: id.into(),
+            skill: "dev/review".into(),
+            agent: "dev".into(),
+            status: "working".into(),
+            created_at: old,
+            updated_at: old,
+        }
+    }
+
+    #[test]
+    fn task_registry_expires_working_past_ttl() {
+        let reg = A2aTaskRegistry::with_ttl(4, Duration::seconds(1));
+        reg.insert(make_stale_record("old", 60));
+        let got = reg
+            .get("old")
+            .expect("entry is still retained, not dropped");
+        assert_eq!(got.status, "expired");
+    }
+
+    #[test]
+    fn task_registry_leaves_fresh_working_alone() {
+        let reg = A2aTaskRegistry::with_ttl(4, Duration::seconds(3600));
+        reg.insert(make_record("fresh"));
+        let got = reg.get("fresh").unwrap();
+        assert_eq!(got.status, "working");
+    }
+
+    #[test]
+    fn task_registry_does_not_expire_terminal_status() {
+        // Cancelled tasks should never be flipped to expired, even if ancient.
+        let reg = A2aTaskRegistry::with_ttl(4, Duration::seconds(1));
+        let mut stale = make_stale_record("done", 60);
+        stale.status = "cancelled".into();
+        reg.insert(stale);
+        let got = reg.get("done").unwrap();
+        assert_eq!(got.status, "cancelled");
+    }
+
+    #[test]
+    fn task_registry_zero_ttl_disables_expiration() {
+        let reg = A2aTaskRegistry::with_ttl(4, Duration::zero());
+        reg.insert(make_stale_record("old", 86_400));
+        let got = reg.get("old").unwrap();
+        assert_eq!(got.status, "working");
+    }
+
+    #[test]
+    fn task_registry_sweep_is_idempotent() {
+        // Re-running sweep on an already-expired task must not thrash state.
+        let reg = A2aTaskRegistry::with_ttl(4, Duration::seconds(1));
+        reg.insert(make_stale_record("old", 60));
+        let first = reg.get("old").unwrap();
+        assert_eq!(first.status, "expired");
+        // Second call: status stays "expired", updated_at must not regress.
+        let second = reg.get("old").unwrap();
+        assert_eq!(second.status, "expired");
+        assert!(second.updated_at >= first.updated_at);
+    }
+
+    #[test]
+    fn task_registry_set_status_after_expiration_still_works() {
+        // Operator can still cancel a task whose status was auto-flipped.
+        let reg = A2aTaskRegistry::with_ttl(4, Duration::seconds(1));
+        reg.insert(make_stale_record("old", 60));
+        // First get triggers sweep → "expired".
+        assert_eq!(reg.get("old").unwrap().status, "expired");
+        let cancelled = reg.set_status("old", "cancelled").unwrap();
+        assert_eq!(cancelled.status, "cancelled");
     }
 
     #[tokio::test]
