@@ -86,6 +86,7 @@ pub async fn handle(action: A2aAction, config_path: &str) -> Result<()> {
                 bus_socket,
                 auth_mode: a2a_cfg.auth.clone(),
                 trusted_keys,
+                tasks: a2a_server::A2aTaskRegistry::default(),
             });
 
             a2a_server::serve(listen_addr, state).await

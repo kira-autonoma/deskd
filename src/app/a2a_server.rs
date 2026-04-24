@@ -5,7 +5,8 @@
 //! - `GET /.well-known/agent-card.json` — discovery
 //! - `POST /a2a` — JSON-RPC 2.0 (tasks/send, tasks/get, tasks/cancel)
 
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use axum::{
@@ -14,9 +15,92 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::app::a2a::AgentCard;
+
+/// Default capacity for the in-memory A2A task registry.
+/// Older tasks are evicted in FIFO order once the cap is reached.
+const DEFAULT_TASK_REGISTRY_CAPACITY: usize = 1024;
+
+/// One row in the A2A task registry, tracking a task accepted via `tasks/send`.
+///
+/// Task completion is not observable from `tasks/send` today (bus routing is
+/// fire-and-forget), so newly-created tasks stay in `working` until explicitly
+/// cancelled via `tasks/cancel`. A later phase will wire task completion into
+/// this registry.
+#[derive(Debug, Clone, Serialize)]
+pub struct A2aTaskRecord {
+    pub task_id: String,
+    pub skill: String,
+    pub agent: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Bounded in-memory store of recent A2A tasks.
+///
+/// Lookups go through `HashMap` (O(1)); eviction is FIFO via `VecDeque`. Once
+/// `capacity` is reached, the oldest entry is dropped. Shared state is guarded
+/// by a single `Mutex` — contention is low since the registry is only touched
+/// on the task RPC hot path.
+pub struct A2aTaskRegistry {
+    inner: Mutex<RegistryInner>,
+    capacity: usize,
+}
+
+struct RegistryInner {
+    tasks: HashMap<String, A2aTaskRecord>,
+    order: VecDeque<String>,
+}
+
+impl A2aTaskRegistry {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            inner: Mutex::new(RegistryInner {
+                tasks: HashMap::new(),
+                order: VecDeque::new(),
+            }),
+            capacity: capacity.max(1),
+        }
+    }
+
+    /// Insert a freshly-created task. Evicts the oldest entry when full.
+    pub fn insert(&self, record: A2aTaskRecord) {
+        let mut inner = self.inner.lock().expect("A2A registry mutex poisoned");
+        if inner.tasks.len() >= self.capacity
+            && let Some(oldest) = inner.order.pop_front()
+        {
+            inner.tasks.remove(&oldest);
+        }
+        inner.order.push_back(record.task_id.clone());
+        inner.tasks.insert(record.task_id.clone(), record);
+    }
+
+    /// Return a clone of the task record, if present.
+    pub fn get(&self, task_id: &str) -> Option<A2aTaskRecord> {
+        let inner = self.inner.lock().expect("A2A registry mutex poisoned");
+        inner.tasks.get(task_id).cloned()
+    }
+
+    /// Transition an existing task to the given status, updating `updated_at`.
+    /// Returns the updated record, or `None` if the task is unknown.
+    pub fn set_status(&self, task_id: &str, status: &str) -> Option<A2aTaskRecord> {
+        let mut inner = self.inner.lock().expect("A2A registry mutex poisoned");
+        let record = inner.tasks.get_mut(task_id)?;
+        record.status = status.to_string();
+        record.updated_at = Utc::now();
+        Some(record.clone())
+    }
+}
+
+impl Default for A2aTaskRegistry {
+    fn default() -> Self {
+        Self::new(DEFAULT_TASK_REGISTRY_CAPACITY)
+    }
+}
 
 /// Shared state for the A2A HTTP server.
 pub struct A2aState {
@@ -31,6 +115,8 @@ pub struct A2aState {
     /// Trusted public keys for JWT verification (raw Ed25519 bytes).
     /// Incoming JWTs are verified against each key until one matches.
     pub trusted_keys: Vec<Vec<u8>>,
+    /// In-memory registry of A2A tasks created via `tasks/send`.
+    pub tasks: A2aTaskRegistry,
 }
 
 /// Start the A2A HTTP server.
@@ -121,8 +207,8 @@ async fn handle_a2a_rpc(
 
     match req.method.as_str() {
         "tasks/send" => handle_tasks_send(req.id, &req.params, &state).await,
-        "tasks/get" => handle_tasks_get(req.id, &req.params),
-        "tasks/cancel" => handle_tasks_cancel(req.id, &req.params),
+        "tasks/get" => handle_tasks_get(req.id, &req.params, &state),
+        "tasks/cancel" => handle_tasks_cancel(req.id, &req.params, &state),
         _ => (
             StatusCode::OK,
             Json(JsonRpcResponse::error(
@@ -172,18 +258,29 @@ async fn handle_tasks_send(
     let task_id = uuid::Uuid::new_v4().to_string();
 
     match crate::app::bus::send_message(&state.bus_socket, "a2a", &target, message).await {
-        Ok(_) => (
-            StatusCode::OK,
-            Json(JsonRpcResponse::success(
-                id,
-                serde_json::json!({
-                    "taskId": task_id,
-                    "status": "working",
-                    "skill": skill_id,
-                    "agent": agent_name,
-                }),
-            )),
-        ),
+        Ok(_) => {
+            let now = Utc::now();
+            state.tasks.insert(A2aTaskRecord {
+                task_id: task_id.clone(),
+                skill: skill_id.to_string(),
+                agent: agent_name.to_string(),
+                status: "working".to_string(),
+                created_at: now,
+                updated_at: now,
+            });
+            (
+                StatusCode::OK,
+                Json(JsonRpcResponse::success(
+                    id,
+                    serde_json::json!({
+                        "taskId": task_id,
+                        "status": "working",
+                        "skill": skill_id,
+                        "agent": agent_name,
+                    }),
+                )),
+            )
+        }
         Err(e) => (
             StatusCode::OK,
             Json(JsonRpcResponse::error(
@@ -195,10 +292,16 @@ async fn handle_tasks_send(
     }
 }
 
-/// tasks/get — check task status (stub for Phase 2).
+/// tasks/get — look up a task in the in-memory registry.
+///
+/// Returns the current record for tasks that were accepted by this server via
+/// `tasks/send`. Tasks remain in `working` until explicitly cancelled or
+/// evicted by the registry's FIFO cap. Unknown task IDs return a -32002
+/// "task not found" error, per the A2A convention.
 fn handle_tasks_get(
     id: Option<serde_json::Value>,
     params: &serde_json::Value,
+    state: &A2aState,
 ) -> (StatusCode, Json<JsonRpcResponse>) {
     let task_id = params.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -213,21 +316,34 @@ fn handle_tasks_get(
         );
     }
 
-    // Phase 2 stub — task tracking will be added in a later phase.
-    (
-        StatusCode::OK,
-        Json(JsonRpcResponse::error(
-            id,
-            -32601,
-            "tasks/get not yet implemented (Phase 3)".into(),
-        )),
-    )
+    match state.tasks.get(task_id) {
+        Some(record) => (
+            StatusCode::OK,
+            Json(JsonRpcResponse::success(
+                id,
+                serde_json::to_value(&record).unwrap_or_else(|_| serde_json::json!({})),
+            )),
+        ),
+        None => (
+            StatusCode::OK,
+            Json(JsonRpcResponse::error(
+                id,
+                -32002,
+                format!("task not found: {task_id}"),
+            )),
+        ),
+    }
 }
 
-/// tasks/cancel — cancel a running task (stub for Phase 2).
+/// tasks/cancel — mark a registered task as cancelled.
+///
+/// The bus layer is fire-and-forget so there is nothing to physically stop,
+/// but the registry entry transitions to `cancelled` so subsequent `tasks/get`
+/// calls report the new state. Unknown task IDs return -32002.
 fn handle_tasks_cancel(
     id: Option<serde_json::Value>,
     params: &serde_json::Value,
+    state: &A2aState,
 ) -> (StatusCode, Json<JsonRpcResponse>) {
     let task_id = params.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -242,14 +358,23 @@ fn handle_tasks_cancel(
         );
     }
 
-    (
-        StatusCode::OK,
-        Json(JsonRpcResponse::error(
-            id,
-            -32601,
-            "tasks/cancel not yet implemented (Phase 3)".into(),
-        )),
-    )
+    match state.tasks.set_status(task_id, "cancelled") {
+        Some(record) => (
+            StatusCode::OK,
+            Json(JsonRpcResponse::success(
+                id,
+                serde_json::to_value(&record).unwrap_or_else(|_| serde_json::json!({})),
+            )),
+        ),
+        None => (
+            StatusCode::OK,
+            Json(JsonRpcResponse::error(
+                id,
+                -32002,
+                format!("task not found: {task_id}"),
+            )),
+        ),
+    }
 }
 
 /// Check authentication based on the configured auth mode.
@@ -334,6 +459,7 @@ mod tests {
                 "none".into()
             },
             trusted_keys: vec![],
+            tasks: A2aTaskRegistry::default(),
         })
     }
 
@@ -453,6 +579,7 @@ mod tests {
             bus_socket: "/tmp/test.sock".into(),
             auth_mode: "jwt".into(),
             trusted_keys: vec![sender_kp.public_key_bytes().to_vec()],
+            tasks: A2aTaskRegistry::default(),
         });
         (state, sender_kp)
     }
@@ -487,6 +614,149 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ─── Task registry tests ────────────────────────────────────────────────
+
+    fn make_record(id: &str) -> A2aTaskRecord {
+        let now = Utc::now();
+        A2aTaskRecord {
+            task_id: id.into(),
+            skill: "dev/review".into(),
+            agent: "dev".into(),
+            status: "working".into(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn task_registry_insert_and_get() {
+        let reg = A2aTaskRegistry::new(8);
+        reg.insert(make_record("task-1"));
+        let got = reg.get("task-1").expect("task-1 should exist");
+        assert_eq!(got.status, "working");
+        assert!(reg.get("missing").is_none());
+    }
+
+    #[test]
+    fn task_registry_fifo_eviction() {
+        let reg = A2aTaskRegistry::new(2);
+        reg.insert(make_record("a"));
+        reg.insert(make_record("b"));
+        reg.insert(make_record("c"));
+        // "a" is the oldest and must have been evicted.
+        assert!(reg.get("a").is_none());
+        assert!(reg.get("b").is_some());
+        assert!(reg.get("c").is_some());
+    }
+
+    #[test]
+    fn task_registry_set_status() {
+        let reg = A2aTaskRegistry::new(4);
+        reg.insert(make_record("task-1"));
+        let before = reg.get("task-1").unwrap();
+        // Ensure updated_at actually advances.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let updated = reg
+            .set_status("task-1", "cancelled")
+            .expect("known task is returned");
+        assert_eq!(updated.status, "cancelled");
+        assert!(updated.updated_at >= before.updated_at);
+        assert!(reg.set_status("unknown", "cancelled").is_none());
+    }
+
+    #[tokio::test]
+    async fn a2a_tasks_get_unknown_returns_not_found() {
+        let app = router(make_state(None));
+        let req = Request::post("/a2a")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tasks/get","params":{"taskId":"does-not-exist"}}"#,
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let rpc: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rpc["error"]["code"], -32002);
+        assert!(
+            rpc["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("not found")
+        );
+    }
+
+    #[tokio::test]
+    async fn a2a_tasks_get_returns_registered_task() {
+        let state = make_state(None);
+        state.tasks.insert(make_record("t-known"));
+        let app = router(state);
+
+        let req = Request::post("/a2a")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tasks/get","params":{"taskId":"t-known"}}"#,
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let rpc: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rpc["result"]["task_id"], "t-known");
+        assert_eq!(rpc["result"]["status"], "working");
+        assert_eq!(rpc["result"]["skill"], "dev/review");
+    }
+
+    #[tokio::test]
+    async fn a2a_tasks_cancel_transitions_status() {
+        let state = make_state(None);
+        state.tasks.insert(make_record("t-cancel"));
+        let app = router(Arc::clone(&state));
+
+        let req = Request::post("/a2a")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tasks/cancel","params":{"taskId":"t-cancel"}}"#,
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let rpc: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rpc["result"]["status"], "cancelled");
+
+        // Subsequent get must reflect the cancelled status.
+        assert_eq!(state.tasks.get("t-cancel").unwrap().status, "cancelled");
+    }
+
+    #[tokio::test]
+    async fn a2a_tasks_cancel_unknown_returns_not_found() {
+        let app = router(make_state(None));
+        let req = Request::post("/a2a")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tasks/cancel","params":{"taskId":"nope"}}"#,
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let rpc: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(rpc["error"]["code"], -32002);
     }
 
     #[tokio::test]
