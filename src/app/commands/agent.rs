@@ -194,7 +194,11 @@ pub async fn handle(action: AgentAction) -> Result<()> {
             );
             println!("Total turns:{}", s.total_turns);
             println!("Total cost: ${:.4}", s.total_cost);
-            println!("Budget:     ${:.2}", s.config.budget_usd);
+            if s.config.budget_usd > 0.0 {
+                println!("Budget:     ${:.2}", s.config.budget_usd);
+            } else {
+                println!("Budget:     unlimited");
+            }
             println!(
                 "Session:    {}",
                 if s.session_id.is_empty() {
@@ -393,7 +397,11 @@ pub async fn handle(action: AgentAction) -> Result<()> {
                 println!("Model:       {}", s.config.model);
                 println!("Turns:       {}", s.total_turns);
                 println!("Cost:        ${:.4}", s.total_cost);
-                println!("Budget:      ${:.2}", s.config.budget_usd);
+                if s.config.budget_usd > 0.0 {
+                    println!("Budget:      ${:.2}", s.config.budget_usd);
+                } else {
+                    println!("Budget:      unlimited");
+                }
                 println!("Created:     {}", s.created_at);
                 println!("Work dir:    {}", s.config.work_dir);
                 if !s.current_task.is_empty() {
