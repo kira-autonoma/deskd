@@ -892,7 +892,12 @@ fn extract_task_context(msg: &Message, _name: &str) -> Option<TaskContext> {
 }
 
 /// Check if budget is exceeded. Returns Some(error_message) if over budget.
+///
+/// `budget_usd <= 0.0` disables the cap (unlimited budget); see #387.
 fn check_budget(name: &str, budget_usd: f64) -> Option<String> {
+    if !budget_enforced(budget_usd) {
+        return None;
+    }
     let current_state = agent::load_state(name).ok()?;
     if current_state.total_cost >= budget_usd {
         warn!(
@@ -908,6 +913,15 @@ fn check_budget(name: &str, budget_usd: f64) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Returns true when `budget_usd` should be enforced as a hard cap.
+///
+/// A non-positive value (including `0.0`) means "unlimited" — the worker
+/// skips the cost check entirely. NaN is treated as disabled too so that
+/// a malformed config can never block tasks silently.
+fn budget_enforced(budget_usd: f64) -> bool {
+    budget_usd > 0.0
 }
 
 /// Log a skipped task (budget exceeded or empty payload).
@@ -1406,6 +1420,36 @@ fn truncate(s: &str, max: usize) -> &str {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // ─── budget_enforced tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_budget_enforced_positive_value() {
+        assert!(budget_enforced(50.0));
+        assert!(budget_enforced(0.01));
+    }
+
+    #[test]
+    fn test_budget_enforced_zero_is_unlimited() {
+        assert!(!budget_enforced(0.0));
+    }
+
+    #[test]
+    fn test_budget_enforced_negative_is_unlimited() {
+        assert!(!budget_enforced(-1.0));
+    }
+
+    #[test]
+    fn test_budget_enforced_nan_is_unlimited() {
+        assert!(!budget_enforced(f64::NAN));
+    }
+
+    #[test]
+    fn test_check_budget_unlimited_skips_state_lookup() {
+        // A non-existent agent would cause load_state to fail; the early
+        // return on budget_usd == 0.0 must prevent any lookup.
+        assert!(check_budget("definitely-not-an-agent-xyz-387", 0.0).is_none());
+    }
 
     // ─── truncate tests ──────────────────────────────────────────────────────
 

@@ -180,6 +180,8 @@ pub struct AgentDef {
     #[serde(default = "default_command")]
     pub command: Vec<String>,
     /// Budget cap in USD. Worker rejects tasks when exceeded.
+    /// A value of `0` (or any non-positive value) disables the cap and treats
+    /// the agent as having an unlimited budget; see worker::check_budget.
     #[serde(default = "default_budget_usd")]
     pub budget_usd: f64,
     /// Container config. When set, the agent process runs inside a container.
