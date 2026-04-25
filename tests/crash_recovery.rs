@@ -8,6 +8,8 @@
 //! 3. Bus reconnection: agent reconnects to bus after crash
 //! 4. Error message delivery: crash error is sent back to sender via bus
 
+#![allow(clippy::approx_constant, clippy::collapsible_if)]
+
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;

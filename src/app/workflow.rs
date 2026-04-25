@@ -1626,7 +1626,7 @@ mod tests {
         // Simulate a completion with "LGTM" result — should transition to "approved".
         let result = handle_completion(
             &bus,
-            &[model.clone()],
+            std::slice::from_ref(&model),
             &sm_store,
             &task_store,
             &inst.id,

@@ -301,6 +301,26 @@ pub enum AgentAction {
         #[arg(long, default_value = "50")]
         max_turns: u32,
     },
+    /// Update an agent's settings in workspace.yaml.
+    ///
+    /// Currently supports switching the named container profile referenced
+    /// by the agent. Edits the workspace.yaml file in place. Run
+    /// `deskd restart` afterwards for the change to take effect.
+    ///
+    /// Examples:
+    ///   deskd agent set uagent --container work
+    ///   deskd agent set uagent --container gcp --config /etc/deskd/workspace.yaml
+    Set {
+        /// Agent name as defined in workspace.yaml.
+        name: String,
+        /// Switch the agent to a named container profile from the
+        /// top-level `containers:` map.
+        #[arg(long)]
+        container: Option<String>,
+        /// Path to workspace.yaml. Auto-detected from running serve if omitted.
+        #[arg(long)]
+        config: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

@@ -1779,7 +1779,7 @@ mod tests {
         };
 
         // Verify all bus events are correctly formatted with source attribution.
-        let events: Vec<String> = vec![&dev_msg, &worker_msg, &worker_task_msg]
+        let events: Vec<String> = [&dev_msg, &worker_msg, &worker_task_msg]
             .iter()
             .map(|m| format_memory_event(m))
             .collect();

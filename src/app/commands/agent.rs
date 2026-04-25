@@ -549,6 +549,26 @@ pub async fn handle(action: AgentAction) -> Result<()> {
             agent::remove(&name).await?;
             println!("Agent {} removed", name);
         }
+        AgentAction::Set {
+            name,
+            container,
+            config: config_opt,
+        } => {
+            let workspace_path = resolve_workspace_path(config_opt)?;
+            let Some(profile) = container else {
+                anyhow::bail!(
+                    "`deskd agent set` requires at least one field to update (e.g. --container)"
+                );
+            };
+            set_agent_container(&workspace_path, &name, &profile)?;
+            println!(
+                "Updated agent '{}' container profile to '{}' in {}",
+                name, profile, workspace_path
+            );
+            println!(
+                "Run `deskd restart` (or restart the agent's process) for the change to take effect."
+            );
+        }
         AgentAction::Spawn {
             name,
             task,
@@ -662,4 +682,228 @@ fn print_inbox_message(msg: &unified_inbox::InboxMessage) {
     println!("─── {} [{}] ───", from, ts);
     println!("{}", msg.text);
     println!();
+}
+
+/// Resolve the workspace.yaml path for `deskd agent set`:
+/// explicit flag > running serve state > error.
+fn resolve_workspace_path(explicit: Option<String>) -> Result<String> {
+    if let Some(path) = explicit {
+        return Ok(path);
+    }
+    if let Some(state) = config::ServeState::load() {
+        return Ok(state.workspace_config);
+    }
+    anyhow::bail!("no --config provided and deskd serve is not running (no serve state found)")
+}
+
+/// Edit `workspace.yaml` in place: set the named agent's `container:` field
+/// to the string `profile_name`. Validates that the profile is defined under
+/// the top-level `containers:` map and that the agent exists.
+pub(crate) fn set_agent_container(
+    workspace_path: &str,
+    agent_name: &str,
+    profile_name: &str,
+) -> Result<()> {
+    let raw = std::fs::read_to_string(workspace_path).map_err(|e| {
+        anyhow::anyhow!("failed to read workspace config {}: {}", workspace_path, e)
+    })?;
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&raw)
+        .map_err(|e| anyhow::anyhow!("failed to parse workspace yaml: {}", e))?;
+
+    // Validate profile exists in top-level containers map.
+    let profile_keys: Vec<String> = doc
+        .get("containers")
+        .and_then(|v| v.as_mapping())
+        .map(|m| {
+            m.keys()
+                .filter_map(|k| k.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !profile_keys.iter().any(|k| k == profile_name) {
+        let available = if profile_keys.is_empty() {
+            "<none defined>".to_string()
+        } else {
+            profile_keys.join(", ")
+        };
+        anyhow::bail!(
+            "container profile '{}' not defined (available: {})",
+            profile_name,
+            available
+        );
+    }
+
+    // Find the named agent in agents[] and overwrite its `container:` field
+    // with the profile name string.
+    let agents = doc
+        .get_mut("agents")
+        .and_then(|v| v.as_sequence_mut())
+        .ok_or_else(|| anyhow::anyhow!("workspace yaml has no `agents:` list"))?;
+
+    let mut updated = false;
+    for agent in agents.iter_mut() {
+        let name_matches = agent
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|n| n == agent_name)
+            .unwrap_or(false);
+        if !name_matches {
+            continue;
+        }
+        let mapping = agent
+            .as_mapping_mut()
+            .ok_or_else(|| anyhow::anyhow!("agent entry is not a mapping"))?;
+        mapping.insert(
+            serde_yaml::Value::String("container".to_string()),
+            serde_yaml::Value::String(profile_name.to_string()),
+        );
+        updated = true;
+        break;
+    }
+    if !updated {
+        anyhow::bail!(
+            "agent '{}' not found in {} (check workspace.yaml `agents:` list)",
+            agent_name,
+            workspace_path
+        );
+    }
+
+    let serialized = serde_yaml::to_string(&doc)
+        .map_err(|e| anyhow::anyhow!("failed to re-serialize workspace yaml: {}", e))?;
+    std::fs::write(workspace_path, serialized).map_err(|e| {
+        anyhow::anyhow!("failed to write workspace config {}: {}", workspace_path, e)
+    })?;
+    info!(
+        agent = agent_name,
+        profile = profile_name,
+        path = workspace_path,
+        "updated container profile"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a unique temp dir under std::env::temp_dir() (no tempfile crate).
+    /// Caller is responsible for cleanup; tests below remove it via `drop_dir`.
+    struct TmpDir(std::path::PathBuf);
+    impl TmpDir {
+        fn new(tag: &str) -> Self {
+            let id = uuid::Uuid::new_v4().to_string();
+            let p = std::env::temp_dir().join(format!("deskd-set-{}-{}", tag, id));
+            std::fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn write_tmp(path: &std::path::Path, content: &str) {
+        std::fs::write(path, content).unwrap();
+    }
+
+    #[test]
+    fn set_agent_container_updates_string_ref() {
+        let tmp = TmpDir::new("string-ref");
+        let path = tmp.path().join("workspace.yaml");
+        let yaml = r#"containers:
+  personal:
+    image: claude-personal
+  work:
+    image: claude-work
+agents:
+  - name: uagent
+    work_dir: /home/uagent
+    container: personal
+"#;
+        write_tmp(&path, yaml);
+        set_agent_container(path.to_str().unwrap(), "uagent", "work").unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        let doc: serde_yaml::Value = serde_yaml::from_str(&after).unwrap();
+        let container = doc["agents"][0]["container"].as_str().unwrap();
+        assert_eq!(container, "work");
+    }
+
+    #[test]
+    fn set_agent_container_replaces_inline_with_named_ref() {
+        let tmp = TmpDir::new("inline-replace");
+        let path = tmp.path().join("workspace.yaml");
+        let yaml = r#"containers:
+  work:
+    image: claude-work
+agents:
+  - name: uagent
+    work_dir: /home/uagent
+    container:
+      image: inline-image
+      env:
+        FOO: bar
+"#;
+        write_tmp(&path, yaml);
+        set_agent_container(path.to_str().unwrap(), "uagent", "work").unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        let doc: serde_yaml::Value = serde_yaml::from_str(&after).unwrap();
+        // After update, container is a string reference.
+        let container = doc["agents"][0]["container"].as_str().unwrap();
+        assert_eq!(container, "work");
+    }
+
+    #[test]
+    fn set_agent_container_unknown_profile_errors() {
+        let tmp = TmpDir::new("unknown-profile");
+        let path = tmp.path().join("workspace.yaml");
+        let yaml = r#"containers:
+  personal:
+    image: claude-personal
+agents:
+  - name: uagent
+    work_dir: /home/uagent
+    container: personal
+"#;
+        write_tmp(&path, yaml);
+        let err = set_agent_container(path.to_str().unwrap(), "uagent", "ghost").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("ghost"));
+        assert!(msg.contains("personal"));
+    }
+
+    #[test]
+    fn set_agent_container_unknown_agent_errors() {
+        let tmp = TmpDir::new("unknown-agent");
+        let path = tmp.path().join("workspace.yaml");
+        let yaml = r#"containers:
+  work:
+    image: claude-work
+agents:
+  - name: uagent
+    work_dir: /home/uagent
+    container: work
+"#;
+        write_tmp(&path, yaml);
+        let err = set_agent_container(path.to_str().unwrap(), "missing", "work").unwrap_err();
+        assert!(err.to_string().contains("missing"));
+    }
+
+    #[test]
+    fn set_agent_container_no_profiles_section_errors() {
+        let tmp = TmpDir::new("no-profiles");
+        let path = tmp.path().join("workspace.yaml");
+        let yaml = r#"agents:
+  - name: uagent
+    work_dir: /home/uagent
+    container:
+      image: foo
+"#;
+        write_tmp(&path, yaml);
+        let err = set_agent_container(path.to_str().unwrap(), "uagent", "work").unwrap_err();
+        assert!(err.to_string().contains("not defined"));
+    }
 }
