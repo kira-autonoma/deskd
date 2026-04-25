@@ -137,9 +137,9 @@ async fn dispatch(
         "usage_stats" => handle_usage_stats(params).await,
         "agent_turn_stats" => handle_agent_turn_stats(params),
         "schedule_list" => handle_schedule_list(user_config),
-        "inbox_list" => handle_inbox_list(),
-        "inbox_read" => handle_inbox_read(params),
-        "inbox_search" => handle_inbox_search(params),
+        "inbox_list" => handle_inbox_list(agent_name, user_config),
+        "inbox_read" => handle_inbox_read(params, agent_name, user_config),
+        "inbox_search" => handle_inbox_search(params, agent_name, user_config),
         "bus_status" => handle_bus_status(bus_socket).await,
         "room_list" => handle_room_list().await,
         "room_children" => handle_room_children(params),
@@ -399,16 +399,39 @@ fn handle_schedule_list(user_config: Option<&UserConfig>) -> Result<Value> {
     Ok(json!(schedules))
 }
 
-fn handle_inbox_list() -> Result<Value> {
+fn handle_inbox_list(agent_name: &str, user_config: Option<&UserConfig>) -> Result<Value> {
     let inboxes = mcp_service::list_inboxes()?;
-    Ok(json!(inboxes))
+    let filtered: Vec<Value> = inboxes
+        .into_iter()
+        .filter(|entry| {
+            entry
+                .get("inbox")
+                .and_then(|v| v.as_str())
+                .map(|name| {
+                    crate::app::mcp_tools::inbox_access_allowed(agent_name, name, user_config)
+                })
+                .unwrap_or(false)
+        })
+        .collect();
+    Ok(json!(filtered))
 }
 
-fn handle_inbox_read(params: &Value) -> Result<Value> {
+fn handle_inbox_read(
+    params: &Value,
+    agent_name: &str,
+    user_config: Option<&UserConfig>,
+) -> Result<Value> {
     let inbox = params
         .get("inbox")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing 'inbox' parameter"))?;
+    if !crate::app::mcp_tools::inbox_access_allowed(agent_name, inbox, user_config) {
+        bail!(
+            "inbox access denied: agent \"{}\" is not in allow-list for inbox \"{}\"",
+            agent_name,
+            inbox
+        );
+    }
     let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
     let since = params
         .get("since")
@@ -419,13 +442,26 @@ fn handle_inbox_read(params: &Value) -> Result<Value> {
     Ok(json!(messages))
 }
 
-fn handle_inbox_search(params: &Value) -> Result<Value> {
+fn handle_inbox_search(
+    params: &Value,
+    agent_name: &str,
+    user_config: Option<&UserConfig>,
+) -> Result<Value> {
     let query = params
         .get("query")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing 'query' parameter"))?;
     let inbox = params.get("inbox").and_then(|v| v.as_str());
     let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+    if let Some(name) = inbox
+        && !crate::app::mcp_tools::inbox_access_allowed(agent_name, name, user_config)
+    {
+        bail!(
+            "inbox access denied: agent \"{}\" is not in allow-list for inbox \"{}\"",
+            agent_name,
+            name
+        );
+    }
     let results = mcp_service::search_inbox(inbox, query, limit)?;
     Ok(json!(results))
 }
@@ -1073,14 +1109,14 @@ mod tests {
 
     #[test]
     fn test_inbox_read_missing_inbox() {
-        let result = handle_inbox_read(&json!({}));
+        let result = handle_inbox_read(&json!({}), "test-agent", None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("missing 'inbox'"));
     }
 
     #[test]
     fn test_inbox_search_missing_query() {
-        let result = handle_inbox_search(&json!({}));
+        let result = handle_inbox_search(&json!({}), "test-agent", None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("missing 'query'"));
     }

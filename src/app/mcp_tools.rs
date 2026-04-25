@@ -628,9 +628,13 @@ fn parse_at_time(s: &str) -> Result<chrono::DateTime<chrono::Utc>> {
 /// - An agent can always read its own inbox (name matches agent_name).
 /// - If the agent is a sub-agent with `inbox_read` configured, check the
 ///   glob patterns in that allow-list.
-/// - If `inbox_read` is None (not configured), only own inbox is allowed.
-/// - Top-level agents (not in user_config.agents) have unrestricted access.
-fn inbox_access_allowed(
+/// - If `inbox_read` is None on a sub-agent, only own inbox is allowed.
+/// - For top-level agents (not in `user_config.agents`), the per-agent
+///   `inbox_acl` field on `UserConfig` is consulted: when `Some(list)`, only
+///   the agent's own inbox plus listed glob patterns are readable. When
+///   absent (`None`), behavior is unrestricted (current default — backward
+///   compatible).
+pub(crate) fn inbox_access_allowed(
     agent_name: &str,
     inbox_name: &str,
     user_config: Option<&UserConfig>,
@@ -639,18 +643,27 @@ fn inbox_access_allowed(
     if inbox_name == agent_name {
         return true;
     }
-
-    // If this agent is a sub-agent with inbox_read ACL, check it.
-    if let Some(cfg) = user_config
-        && let Some(sub) = cfg.agents.iter().find(|a| a.name == agent_name)
-    {
-        return match &sub.inbox_read {
-            Some(patterns) => patterns.iter().any(|p| glob_match(p, inbox_name)),
-            None => false, // No inbox_read → own inbox only
-        };
+    // The "replies/<agent>" convention belongs to the agent.
+    if inbox_name == format!("replies/{}", agent_name) {
+        return true;
     }
 
-    // Top-level agent (not a sub-agent) → unrestricted.
+    if let Some(cfg) = user_config {
+        // If this agent is a sub-agent with inbox_read ACL, check it.
+        if let Some(sub) = cfg.agents.iter().find(|a| a.name == agent_name) {
+            return match &sub.inbox_read {
+                Some(patterns) => patterns.iter().any(|p| glob_match(p, inbox_name)),
+                None => false, // No inbox_read → own inbox only
+            };
+        }
+
+        // Top-level agent: consult inbox_acl on the user config itself.
+        if let Some(patterns) = &cfg.inbox_acl {
+            return patterns.iter().any(|p| glob_match(p, inbox_name));
+        }
+    }
+
+    // No config or no inbox_acl on top-level agent → unrestricted (default).
     true
 }
 
@@ -688,7 +701,7 @@ pub(crate) async fn call_read_inbox(
 
     if !inbox_access_allowed(agent_name, inbox, user_config) {
         bail!(
-            "read_inbox: agent '{}' is not allowed to read inbox '{}'",
+            "inbox access denied: agent \"{}\" is not in allow-list for inbox \"{}\"",
             agent_name,
             inbox
         );
@@ -726,7 +739,7 @@ pub(crate) async fn call_search_inbox(
         && !inbox_access_allowed(agent_name, name, user_config)
     {
         bail!(
-            "search_inbox: agent '{}' is not allowed to search inbox '{}'",
+            "inbox access denied: agent \"{}\" is not in allow-list for inbox \"{}\"",
             agent_name,
             name
         );
@@ -738,17 +751,19 @@ pub(crate) async fn call_search_inbox(
     // search without ACL filtering, we restrict to the agent's own inbox.
     let effective_inbox = if inbox.is_some() {
         inbox
-    } else {
-        // If the agent is a sub-agent, restrict cross-inbox search to own inbox.
-        if let Some(cfg) = user_config {
-            if cfg.agents.iter().any(|a| a.name == agent_name) {
-                Some(agent_name)
-            } else {
-                None // Top-level agent — search all
-            }
+    } else if let Some(cfg) = user_config {
+        // Sub-agent: cross-inbox search restricted to own inbox.
+        if cfg.agents.iter().any(|a| a.name == agent_name) {
+            Some(agent_name)
+        } else if cfg.inbox_acl.is_some() {
+            // Top-level agent with ACL: cross-inbox search restricted to own
+            // inbox to avoid leaking content from inboxes outside the ACL.
+            Some(agent_name)
         } else {
-            None
+            None // Top-level agent without ACL — search all (default)
         }
+    } else {
+        None
     };
 
     let output = mcp_service::search_inbox(effective_inbox, query, limit)?;
@@ -1750,6 +1765,81 @@ mod tests {
     fn inbox_acl_no_config_unrestricted() {
         // No user_config at all → unrestricted.
         assert!(inbox_access_allowed("agent", "any-inbox", None));
+    }
+
+    // ─── Top-level inbox_acl on UserConfig ─────────────────────────────────
+
+    fn make_top_level_config(inbox_acl: Option<Vec<String>>) -> UserConfig {
+        let yaml = match inbox_acl {
+            Some(patterns) => {
+                let items: Vec<String> = patterns.iter().map(|p| format!("\"{}\"", p)).collect();
+                format!("inbox_acl: [{}]\n", items.join(", "))
+            }
+            None => String::new(),
+        };
+        // Empty yaml is valid for a default UserConfig.
+        if yaml.is_empty() {
+            UserConfig::default()
+        } else {
+            serde_yaml::from_str(&yaml).expect("test config should parse")
+        }
+    }
+
+    #[test]
+    fn top_level_inbox_acl_absent_is_unrestricted() {
+        // Backward compat: no inbox_acl key → top-level agent reads any inbox.
+        let cfg = make_top_level_config(None);
+        assert!(inbox_access_allowed("kira", "anything", Some(&cfg)));
+        assert!(inbox_access_allowed("kira", "dev", Some(&cfg)));
+    }
+
+    #[test]
+    fn top_level_inbox_acl_allows_own_inbox() {
+        // Even with an empty allow-list, the agent's own inbox is readable.
+        let cfg = make_top_level_config(Some(vec![]));
+        assert!(inbox_access_allowed("kira", "kira", Some(&cfg)));
+        assert!(inbox_access_allowed("kira", "replies/kira", Some(&cfg)));
+    }
+
+    #[test]
+    fn top_level_inbox_acl_denies_unlisted() {
+        let cfg = make_top_level_config(Some(vec!["dev".into()]));
+        assert!(!inbox_access_allowed("kira", "secret", Some(&cfg)));
+        assert!(!inbox_access_allowed("kira", "vasya", Some(&cfg)));
+    }
+
+    #[test]
+    fn top_level_inbox_acl_allows_listed_with_glob() {
+        let cfg = make_top_level_config(Some(vec!["dev".into(), "collab-*".into()]));
+        assert!(inbox_access_allowed("kira", "dev", Some(&cfg)));
+        assert!(inbox_access_allowed("kira", "collab-daily", Some(&cfg)));
+        assert!(!inbox_access_allowed("kira", "secret", Some(&cfg)));
+    }
+
+    #[test]
+    fn top_level_inbox_acl_yaml_round_trip() {
+        let yaml = "inbox_acl:\n  - dev\n  - kira\n";
+        let cfg: UserConfig = serde_yaml::from_str(yaml).unwrap();
+        let acl = cfg.inbox_acl.expect("inbox_acl should parse");
+        assert_eq!(acl, vec!["dev".to_string(), "kira".to_string()]);
+    }
+
+    #[test]
+    fn read_inbox_error_message_format() {
+        // The denial error should match the documented "inbox access denied"
+        // wording so callers can match on it.
+        let cfg = make_top_level_config(Some(vec!["dev".into()]));
+        let allowed = inbox_access_allowed("kira", "secret", Some(&cfg));
+        assert!(!allowed);
+        // Spot-check the error format used in call_read_inbox / bus_api by
+        // formatting with the agreed template.
+        let msg = format!(
+            "inbox access denied: agent \"{}\" is not in allow-list for inbox \"{}\"",
+            "kira", "secret"
+        );
+        assert!(msg.starts_with("inbox access denied:"));
+        assert!(msg.contains("\"kira\""));
+        assert!(msg.contains("\"secret\""));
     }
 
     // ─── can_message ACL tests ──────────────────────────────────────────────

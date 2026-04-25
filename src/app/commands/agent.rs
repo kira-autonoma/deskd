@@ -215,6 +215,25 @@ pub async fn handle(action: AgentAction) -> Result<()> {
             follow,
         } => {
             let inbox_name = format!("replies/{}", name);
+            // If invoked from inside an agent's context (DESKD_AGENT_NAME set),
+            // enforce inbox_acl from that agent's deskd.yaml. When invoked from
+            // a human shell (no env), the operator is trusted (file permissions
+            // remain the OS-level guard).
+            if let Ok(caller) = std::env::var("DESKD_AGENT_NAME") {
+                let cfg_path = std::env::var("DESKD_AGENT_CONFIG").ok();
+                let cfg = cfg_path
+                    .as_deref()
+                    .and_then(|p| crate::config::UserConfig::load(p).ok());
+                if !crate::app::mcp_tools::inbox_access_allowed(&caller, &inbox_name, cfg.as_ref())
+                    && !crate::app::mcp_tools::inbox_access_allowed(&caller, &name, cfg.as_ref())
+                {
+                    anyhow::bail!(
+                        "inbox access denied: agent \"{}\" is not in allow-list for inbox \"{}\"",
+                        caller,
+                        name
+                    );
+                }
+            }
             let entries = unified_inbox::read_messages(&inbox_name, 100, None)?;
             if entries.is_empty() && !follow {
                 println!("No messages for {}", name);

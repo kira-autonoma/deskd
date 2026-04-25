@@ -387,6 +387,14 @@ pub struct UserConfig {
     /// A2A needs — what this agent wants done (custom extension to A2A spec).
     #[serde(default)]
     pub needs: Vec<NeedDef>,
+    /// Optional allow-list of inboxes this top-level agent can read (glob patterns).
+    /// If `None` (absent in deskd.yaml), behavior is unrestricted (current default).
+    /// If `Some`, only the agent's own inbox plus any inbox matching one of the
+    /// listed patterns is readable. Useful on shared-user systems (e.g. macOS dev
+    /// laptops) where unix-level file permissions cannot isolate agent inboxes.
+    /// Example: `inbox_acl: ["dev", "collab-*"]`.
+    #[serde(default)]
+    pub inbox_acl: Option<Vec<String>>,
 }
 
 /// An A2A skill advertised in the Agent Card (per A2A spec).
