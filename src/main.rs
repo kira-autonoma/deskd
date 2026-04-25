@@ -98,9 +98,12 @@ async fn main() -> anyhow::Result<()> {
         Commands::Tui { socket } => {
             commands::tui::handle(socket)?;
         }
-        Commands::Status { config: config_opt } => {
+        Commands::Status {
+            config: config_opt,
+            format,
+        } => {
             let config_path = resolve_workspace_config(config_opt)?;
-            commands::status::handle(&config_path).await?;
+            commands::status::handle(&config_path, &format).await?;
         }
         Commands::Restart { config } => {
             commands::restart::handle(config).await?;

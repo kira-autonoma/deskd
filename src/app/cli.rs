@@ -44,11 +44,17 @@ pub enum Commands {
         #[command(subcommand)]
         action: AgentAction,
     },
-    /// Show live status of all agents defined in workspace config.
+    /// Show unified dashboard: agents, sub-agent workers, SM instances, and task queue.
+    ///
+    /// Aggregates output of `deskd agent list`, `deskd sm list`, and `deskd task list`
+    /// into a single view. Use `--format json` for machine-readable output.
     Status {
         /// Path to workspace.yaml. Auto-detected from running serve if omitted.
         #[arg(long)]
         config: Option<String>,
+        /// Output format: "text" (default) or "json".
+        #[arg(long, default_value = "text")]
+        format: String,
     },
     /// Kill the running `deskd serve` process and restart it with the same config.
     Restart {

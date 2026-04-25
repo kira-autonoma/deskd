@@ -3,6 +3,7 @@
 pub mod a2a;
 pub mod agent;
 pub mod bus;
+pub mod dashboard;
 pub mod graph;
 pub mod remind;
 pub mod restart;
