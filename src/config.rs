@@ -119,13 +119,13 @@ pub struct DiscordConfig {
 }
 
 /// Discord channel routing config in the per-user deskd.yaml.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiscordRoutesConfig {
     pub routes: Vec<DiscordRoute>,
 }
 
 /// A single Discord channel route.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DiscordRoute {
     /// Discord channel ID (u64).
     pub channel_id: u64,
@@ -347,7 +347,7 @@ impl ServeState {
 /// Per-user agent config (deskd.yaml, lives in the agent's work_dir).
 /// Defines the agent's own model, system prompt, sub-agents, channels,
 /// Telegram routes, and schedules. Managed by the agent's unix user.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct UserConfig {
     /// Claude model for the main agent. Overridden by workspace.yaml `model` if set.
     #[serde(default = "default_model")]
@@ -404,7 +404,7 @@ pub struct UserConfig {
 
 /// An A2A skill advertised in the Agent Card (per A2A spec).
 /// Defined in deskd.yaml under `skills:`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SkillDef {
     /// Unique skill identifier (e.g. "code-review").
     pub id: String,
@@ -420,7 +420,7 @@ pub struct SkillDef {
 
 /// An A2A need — what the agent wants done (custom extension).
 /// Defined in deskd.yaml under `needs:`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct NeedDef {
     /// Unique need identifier (e.g. "want-restart-button").
     pub id: String,
@@ -444,7 +444,7 @@ fn default_model() -> String {
 
 /// A named channel for broadcast or task-queue communication.
 /// The name becomes the bus target, e.g. `news:ecosystem` or `queue:reviews`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChannelDef {
     pub name: String,
     pub description: String,
@@ -465,7 +465,7 @@ pub enum ScopeType {
 }
 
 /// A sub-agent running within a parent agent's bus scope.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SubAgentDef {
     pub name: String,
     pub model: String,
@@ -548,14 +548,14 @@ impl SubAgentDef {
 }
 
 /// Telegram channel routing config in the per-user deskd.yaml.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TelegramRoutesConfig {
     #[serde(default)]
     pub routes: Vec<TelegramRoute>,
 }
 
 /// A single Telegram chat route.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TelegramRoute {
     /// Telegram chat_id (positive for users/groups, negative for channels/supergroups).
     pub chat_id: i64,
@@ -571,7 +571,7 @@ pub struct TelegramRoute {
 }
 
 /// A scheduled action that fires on a cron expression and posts a message to the bus.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ScheduleDef {
     /// Cron expression, e.g. `"0 9 * * *"` for 9 AM daily.
     pub cron: String,
@@ -587,7 +587,7 @@ pub struct ScheduleDef {
     pub timezone: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ScheduleAction {
     /// Poll GitHub repos for issues with a label, post new issues to target.

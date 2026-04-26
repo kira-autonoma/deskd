@@ -17,6 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -90,6 +91,7 @@ pub struct TelegramAdapter {
     routes: Vec<TelegramRoute>,
     admin_telegram_ids: Vec<i64>,
     agent_name: String,
+    cancel: CancellationToken,
 }
 
 impl TelegramAdapter {
@@ -98,12 +100,14 @@ impl TelegramAdapter {
         routes: Vec<TelegramRoute>,
         admin_telegram_ids: Vec<i64>,
         agent_name: String,
+        cancel: CancellationToken,
     ) -> Self {
         Self {
             token,
             routes,
             admin_telegram_ids,
             agent_name,
+            cancel,
         }
     }
 }
@@ -141,6 +145,7 @@ impl super::Adapter for TelegramAdapter {
             chat_names,
             chat_route_to,
             self.admin_telegram_ids,
+            self.cancel,
         ))
     }
 }
@@ -170,6 +175,7 @@ pub async fn run(
     chat_names: std::collections::HashMap<i64, String>,
     chat_route_to: std::collections::HashMap<i64, String>,
     admin_telegram_ids: Vec<i64>,
+    cancel: CancellationToken,
 ) -> Result<()> {
     info!(agent = %agent_name, "starting Telegram adapter");
 
@@ -192,8 +198,9 @@ pub async fn run(
         let outbound_tx = outbound_tx.clone();
         let socket = socket_path.clone();
         let name = adapter_name.clone();
+        let cancel = cancel.clone();
         tokio::spawn(async move {
-            if let Err(e) = bus_loop(&socket, &name, outbound_tx).await {
+            if let Err(e) = bus_loop(&socket, &name, outbound_tx, cancel).await {
                 tracing::error!(error = %e, "telegram bus loop failed");
             }
         })
@@ -202,8 +209,9 @@ pub async fn run(
     // Task 2: send outbound messages to Telegram, manage typing indicators
     let sender_task = {
         let bot = bot.clone();
+        let cancel = cancel.clone();
         tokio::spawn(async move {
-            outbound_sender(bot, outbound_rx).await;
+            outbound_sender(bot, outbound_rx, cancel).await;
         })
     };
 
@@ -212,6 +220,7 @@ pub async fn run(
         let socket = socket_path.clone();
         let name = agent_name.clone();
         let mention_only: std::collections::HashSet<i64> = mention_only_chats.into_iter().collect();
+        let cancel = cancel.clone();
         tokio::spawn(async move {
             if let Err(e) = polling_loop(
                 bot,
@@ -223,6 +232,7 @@ pub async fn run(
                 chat_names,
                 chat_route_to,
                 admin_telegram_ids,
+                cancel,
             )
             .await
             {
@@ -235,6 +245,7 @@ pub async fn run(
         _ = bus_task => warn!(agent = %agent_name, "telegram bus task exited"),
         _ = sender_task => warn!(agent = %agent_name, "telegram sender task exited"),
         _ = polling_task => warn!(agent = %agent_name, "telegram polling task exited"),
+        _ = cancel.cancelled() => info!(agent = %agent_name, "telegram adapter cancelled"),
     }
 
     Ok(())
@@ -245,6 +256,7 @@ async fn bus_loop(
     socket_path: &str,
     adapter_name: &str,
     outbound_tx: mpsc::UnboundedSender<OutboundCmd>,
+    cancel: CancellationToken,
 ) -> Result<()> {
     let mut stream = UnixStream::connect(socket_path).await.with_context(|| {
         format!(
@@ -268,7 +280,17 @@ async fn bus_loop(
     let (reader, _writer) = stream.into_split();
     let mut lines = BufReader::new(reader).lines();
 
-    while let Some(line) = lines.next_line().await? {
+    loop {
+        let line = tokio::select! {
+            result = lines.next_line() => match result? {
+                Some(l) => l,
+                None => break,
+            },
+            _ = cancel.cancelled() => {
+                info!(adapter = %adapter_name, "telegram bus loop cancelled");
+                break;
+            }
+        };
         if line.is_empty() {
             continue;
         }
@@ -397,11 +419,22 @@ fn spawn_typing(bot: Bot, chat_id: i64) -> tokio::task::JoinHandle<()> {
 
 /// Send messages from the outbound channel to Telegram.
 /// Manages per-chat typing indicators, progress messages, and converts Markdown to HTML.
-async fn outbound_sender(bot: Bot, mut rx: mpsc::UnboundedReceiver<OutboundCmd>) {
+async fn outbound_sender(
+    bot: Bot,
+    mut rx: mpsc::UnboundedReceiver<OutboundCmd>,
+    cancel: CancellationToken,
+) {
     let mut typing_tasks: HashMap<i64, tokio::task::JoinHandle<()>> = HashMap::new();
     let mut progress_ids: HashMap<i64, teloxide::types::MessageId> = HashMap::new();
 
-    while let Some(cmd) = rx.recv().await {
+    loop {
+        let cmd = tokio::select! {
+            result = rx.recv() => match result {
+                Some(c) => c,
+                None => break,
+            },
+            _ = cancel.cancelled() => break,
+        };
         match cmd {
             OutboundCmd::Text { chat_id, text } => {
                 // Abort current typing loop while sending so Telegram doesn't show
@@ -489,7 +522,221 @@ async fn download_photo_base64(bot: &Bot, file_id: &str) -> Result<String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(&buf))
 }
 
+/// Process a single incoming Telegram message and publish it to the bus.
+#[allow(clippy::too_many_arguments)]
+async fn handle_message(
+    bot: &Bot,
+    msg: Message,
+    socket_path: &str,
+    agent_name: &str,
+    bot_username: &str,
+    allowed_chats: &std::collections::HashSet<i64>,
+    mention_only_chats: &std::collections::HashSet<i64>,
+    chat_names: &std::collections::HashMap<i64, String>,
+    chat_route_to: &std::collections::HashMap<i64, String>,
+    admin_ids: &std::collections::HashSet<i64>,
+) -> Result<()> {
+    // Skip messages from the bot itself to prevent reply loops.
+    if msg
+        .from
+        .as_ref()
+        .map(|u| u.username.as_deref() == Some(bot_username))
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    // Skip messages from other bots.
+    if msg.from.as_ref().map(|u| u.is_bot).unwrap_or(false) {
+        return Ok(());
+    }
+
+    // Determine the task text and optional image data from the message.
+    // Photos are base64-encoded in memory and passed alongside the caption.
+    // Pure text messages are passed through unchanged.
+    let mut image_base64: Option<String> = None;
+    let task_text: Option<String> = if let Some(photos) = msg.photo() {
+        // Take the largest photo (Telegram sends sizes smallest → largest).
+        if let Some(largest) = photos.last() {
+            let file_id = largest.file.id.clone();
+            match download_photo_base64(bot, &file_id).await {
+                Ok(b64) => {
+                    image_base64 = Some(b64);
+                    let caption = msg.caption().unwrap_or("[photo attached]");
+                    Some(caption.to_string())
+                }
+                Err(e) => {
+                    warn!(file_id = %file_id, error = %e, "failed to download Telegram photo");
+                    // Fall back to caption-only so the message isn't silently dropped.
+                    let caption = msg
+                        .caption()
+                        .unwrap_or("[photo attached — download failed]");
+                    Some(caption.to_string())
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        msg.text().map(|t| t.to_string())
+    };
+
+    if let Some(text) = task_text {
+        let chat_id = msg.chat.id.0;
+
+        // ── /channel_info — runs BEFORE whitelist ──────────────
+        // This command must work in ANY chat (including unconfigured
+        // ones) so users can discover the chat_id to add to routes.
+        let cmd = text.trim();
+        let cmd_base = cmd.split('@').next().unwrap_or(cmd);
+        if cmd_base == "/channel_info" {
+            let chat_type = match &msg.chat.kind {
+                teloxide::types::ChatKind::Public(p) => match &p.kind {
+                    teloxide::types::PublicChatKind::Supergroup(_) => "supergroup",
+                    teloxide::types::PublicChatKind::Group(_) => "group",
+                    teloxide::types::PublicChatKind::Channel(_) => "channel",
+                },
+                teloxide::types::ChatKind::Private(_) => "private",
+            };
+            let name = chat_names
+                .get(&chat_id)
+                .map(|s| format!("\"{}\" (from route config)", s))
+                .unwrap_or_else(|| "(not configured)".to_string());
+            let is_mention_only = mention_only_chats.contains(&chat_id);
+            let route_to_label = chat_route_to
+                .get(&chat_id)
+                .map(|s| s.as_str())
+                .unwrap_or("default");
+            let route_to_detail = if route_to_label == "default" {
+                format!("default (telegram.in:{})", chat_id)
+            } else {
+                route_to_label.to_string()
+            };
+            let reply = format!(
+                "📋 Channel Info\n─────────────\nChat ID: {}\nChat type: {}\nName: {}\nMention only: {}\nRoute to: {}\nAgent: {}",
+                chat_id,
+                chat_type,
+                name,
+                if is_mention_only { "yes" } else { "no" },
+                route_to_detail,
+                agent_name
+            );
+            let _ = bot.send_message(msg.chat.id, reply).await;
+            return Ok(());
+        }
+
+        // Whitelist check — only process chats explicitly configured in routes.
+        if !allowed_chats.is_empty() && !allowed_chats.contains(&chat_id) {
+            debug!(agent = %agent_name, chat_id = chat_id, "ignoring message — chat not in whitelist");
+            return Ok(());
+        }
+
+        // ── Slash command interception ──────────────────────────────
+        // Handle /status and /restart locally without forwarding to
+        // the agent.  This runs AFTER the whitelist check so that
+        // only authorised chats can invoke these commands.
+        if cmd_base == "/status" {
+            let reply = format_status_reply(agent_name);
+            let _ = bot.send_message(msg.chat.id, reply).await;
+            return Ok(());
+        }
+        if cmd_base == "/restart" {
+            let sender_id = msg.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(0);
+            if !admin_ids.contains(&sender_id) {
+                let _ = bot
+                    .send_message(msg.chat.id, "Permission denied. Admin access required.")
+                    .await;
+                return Ok(());
+            }
+            let reply = handle_restart_command(agent_name, socket_path).await;
+            let _ = bot.send_message(msg.chat.id, reply).await;
+            return Ok(());
+        }
+        if cmd_base == "/context" {
+            let reply = handle_context_command().await;
+            let _ = bot.send_message(msg.chat.id, reply).await;
+            return Ok(());
+        }
+
+        // Write ALL messages from allowed chats to unified inbox,
+        // regardless of mention_only filtering.
+        let sender_username = msg.from.as_ref().and_then(|u| u.username.clone());
+        let inbox_name = format!("telegram/{}", chat_id);
+        let inbox_msg = unified_inbox::InboxMessage {
+            ts: chrono::Utc::now(),
+            source: "telegram".to_string(),
+            from: sender_username,
+            text: text.clone(),
+            metadata: serde_json::json!({
+                "chat_id": chat_id,
+                "chat_name": chat_names.get(&chat_id),
+                "message_id": msg.id.0,
+            }),
+        };
+        if let Err(e) = unified_inbox::write_message(&inbox_name, &inbox_msg) {
+            warn!(chat_id = chat_id, error = %e, "failed to write to unified inbox");
+        }
+
+        // If this chat requires a mention, skip unless @bot_username appears in text.
+        if mention_only_chats.contains(&chat_id) {
+            let mention = format!("@{}", bot_username);
+            if !text.contains(&mention) {
+                debug!(agent = %agent_name, chat_id = chat_id, "skipping message — not a mention");
+                return Ok(());
+            }
+        }
+
+        // Use route_to override if configured, otherwise default to telegram.in:<chat_id>.
+        let target = if let Some(rt) = chat_route_to.get(&chat_id) {
+            rt.clone()
+        } else {
+            format!("telegram.in:{}", chat_id)
+        };
+        // reply_to always goes back to Telegram so agent responses reach the chat.
+        let reply_to = format!("telegram.out:{}", chat_id);
+        let chat_name = chat_names.get(&chat_id).cloned();
+
+        debug!(agent = %agent_name, chat_id = chat_id, "received Telegram message");
+
+        // Extract sender metadata from the Telegram message.
+        let sender_info = msg.from.as_ref().map(|u| SenderInfo {
+            id: u.id.0,
+            username: u.username.clone(),
+            first_name: u.first_name.clone(),
+            is_bot: u.is_bot,
+        });
+        let message_id = msg.id.0;
+        let reply_to_message_id = msg.reply_to_message().map(|r| r.id.0);
+        let reply_to_text = msg
+            .reply_to_message()
+            .and_then(|r| r.text().or_else(|| r.caption()).map(|s| s.to_string()));
+
+        if let Err(e) = publish_to_bus(
+            socket_path,
+            agent_name,
+            &text,
+            &target,
+            &reply_to,
+            chat_id,
+            chat_name,
+            image_base64.as_deref(),
+            sender_info.as_ref(),
+            message_id,
+            reply_to_message_id,
+            reply_to_text.as_deref(),
+        )
+        .await
+        {
+            warn!(chat_id = chat_id, error = %e, "failed to publish message to bus");
+            let _ = bot
+                .send_message(msg.chat.id, "Internal error, please try again.")
+                .await;
+        }
+    }
+    Ok(())
+}
+
 /// Poll Telegram for incoming messages and publish them to the bus as `telegram.in:<chat_id>`.
+/// Uses a manual `get_updates` loop instead of `teloxide::repl` so we can cooperatively cancel.
 #[allow(clippy::too_many_arguments)]
 async fn polling_loop(
     bot: Bot,
@@ -501,199 +748,59 @@ async fn polling_loop(
     chat_names: std::collections::HashMap<i64, String>,
     chat_route_to: std::collections::HashMap<i64, String>,
     admin_telegram_ids: Vec<i64>,
+    cancel: CancellationToken,
 ) -> Result<()> {
     let admin_ids: std::collections::HashSet<i64> = admin_telegram_ids.into_iter().collect();
-    teloxide::repl(bot, move |bot: Bot, msg: Message| {
-        let socket = socket_path.clone();
-        let agent = agent_name.clone();
-        let bot_user = bot_username.clone();
-        let allowed = allowed_chats.clone();
-        let mention_only = mention_only_chats.clone();
-        let names = chat_names.clone();
-        let route_to_map = chat_route_to.clone();
-        let admins = admin_ids.clone();
-        async move {
-            // Skip messages from the bot itself to prevent reply loops.
-            if msg.from.as_ref().map(|u| u.username.as_deref() == Some(&bot_user)).unwrap_or(false) {
-                return Ok(());
-            }
-            // Skip messages from other bots.
-            if msg.from.as_ref().map(|u| u.is_bot).unwrap_or(false) {
-                return Ok(());
-            }
+    let mut next_offset: i32 = 0;
 
-            // Determine the task text and optional image data from the message.
-            // Photos are base64-encoded in memory and passed alongside the caption.
-            // Pure text messages are passed through unchanged.
-            let mut image_base64: Option<String> = None;
-            let task_text: Option<String> = if let Some(photos) = msg.photo() {
-                // Take the largest photo (Telegram sends sizes smallest → largest).
-                if let Some(largest) = photos.last() {
-                    let file_id = largest.file.id.clone();
-                    match download_photo_base64(&bot, &file_id).await {
-                        Ok(b64) => {
-                            image_base64 = Some(b64);
-                            let caption = msg.caption().unwrap_or("[photo attached]");
-                            Some(caption.to_string())
-                        }
-                        Err(e) => {
-                            warn!(file_id = %file_id, error = %e, "failed to download Telegram photo");
-                            // Fall back to caption-only so the message isn't silently dropped.
-                            let caption = msg.caption().unwrap_or("[photo attached — download failed]");
-                            Some(caption.to_string())
+    loop {
+        // Build the get_updates future — 30s long-poll timeout.
+        let updates_fut = bot.get_updates().offset(next_offset).timeout(30).send();
+
+        let updates = tokio::select! {
+            result = updates_fut => match result {
+                Ok(u) => u,
+                Err(e) => {
+                    warn!(agent = %agent_name, error = %e, "get_updates error, retrying in 5s");
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(5)) => {},
+                        _ = cancel.cancelled() => {
+                            info!(agent = %agent_name, "telegram polling loop cancelled during backoff");
+                            break;
                         }
                     }
-                } else {
-                    None
+                    continue;
                 }
-            } else {
-                msg.text().map(|t| t.to_string())
-            };
-
-            if let Some(text) = task_text {
-                let chat_id = msg.chat.id.0;
-
-                // ── /channel_info — runs BEFORE whitelist ──────────────
-                // This command must work in ANY chat (including unconfigured
-                // ones) so users can discover the chat_id to add to routes.
-                let cmd = text.trim();
-                let cmd_base = cmd.split('@').next().unwrap_or(cmd);
-                if cmd_base == "/channel_info" {
-                    let chat_type = match &msg.chat.kind {
-                        teloxide::types::ChatKind::Public(p) => match &p.kind {
-                            teloxide::types::PublicChatKind::Supergroup(_) => "supergroup",
-                            teloxide::types::PublicChatKind::Group(_) => "group",
-                            teloxide::types::PublicChatKind::Channel(_) => "channel",
-                        },
-                        teloxide::types::ChatKind::Private(_) => "private",
-                    };
-                    let name = names
-                        .get(&chat_id)
-                        .map(|s| format!("\"{}\" (from route config)", s))
-                        .unwrap_or_else(|| "(not configured)".to_string());
-                    let is_mention_only = mention_only.contains(&chat_id);
-                    let route_to_label = route_to_map
-                        .get(&chat_id)
-                        .map(|s| s.as_str())
-                        .unwrap_or("default");
-                    let route_to_detail = if route_to_label == "default" {
-                        format!("default (telegram.in:{})", chat_id)
-                    } else {
-                        route_to_label.to_string()
-                    };
-                    let reply = format!(
-                        "📋 Channel Info\n─────────────\nChat ID: {}\nChat type: {}\nName: {}\nMention only: {}\nRoute to: {}\nAgent: {}",
-                        chat_id,
-                        chat_type,
-                        name,
-                        if is_mention_only { "yes" } else { "no" },
-                        route_to_detail,
-                        agent
-                    );
-                    let _ = bot.send_message(msg.chat.id, reply).await;
-                    return Ok(());
-                }
-
-                // Whitelist check — only process chats explicitly configured in routes.
-                if !allowed.is_empty() && !allowed.contains(&chat_id) {
-                    debug!(agent = %agent, chat_id = chat_id, "ignoring message — chat not in whitelist");
-                    return Ok(());
-                }
-
-                // ── Slash command interception ──────────────────────────────
-                // Handle /status and /restart locally without forwarding to
-                // the agent.  This runs AFTER the whitelist check so that
-                // only authorised chats can invoke these commands.
-                if cmd_base == "/status" {
-                    let reply = format_status_reply(&agent);
-                    let _ = bot.send_message(msg.chat.id, reply).await;
-                    return Ok(());
-                }
-                if cmd_base == "/restart" {
-                    let sender_id = msg.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(0);
-                    if !admins.contains(&sender_id) {
-                        let _ = bot
-                            .send_message(msg.chat.id, "Permission denied. Admin access required.")
-                            .await;
-                        return Ok(());
-                    }
-                    let reply = handle_restart_command(&agent, &socket).await;
-                    let _ = bot.send_message(msg.chat.id, reply).await;
-                    return Ok(());
-                }
-                if cmd_base == "/context" {
-                    let reply = handle_context_command().await;
-                    let _ = bot.send_message(msg.chat.id, reply).await;
-                    return Ok(());
-                }
-
-                // Write ALL messages from allowed chats to unified inbox,
-                // regardless of mention_only filtering.
-                let sender_username = msg.from.as_ref().and_then(|u| u.username.clone());
-                let inbox_name = format!("telegram/{}", chat_id);
-                let inbox_msg = unified_inbox::InboxMessage {
-                    ts: chrono::Utc::now(),
-                    source: "telegram".to_string(),
-                    from: sender_username,
-                    text: text.clone(),
-                    metadata: serde_json::json!({
-                        "chat_id": chat_id,
-                        "chat_name": names.get(&chat_id),
-                        "message_id": msg.id.0,
-                    }),
-                };
-                if let Err(e) = unified_inbox::write_message(&inbox_name, &inbox_msg) {
-                    warn!(chat_id = chat_id, error = %e, "failed to write to unified inbox");
-                }
-
-                // If this chat requires a mention, skip unless @bot_user appears in text.
-                if mention_only.contains(&chat_id) {
-                    let mention = format!("@{}", bot_user);
-                    if !text.contains(&mention) {
-                        debug!(agent = %agent, chat_id = chat_id, "skipping message — not a mention");
-                        return Ok(());
-                    }
-                }
-
-                // Use route_to override if configured, otherwise default to telegram.in:<chat_id>.
-                let target = if let Some(rt) = route_to_map.get(&chat_id) {
-                    rt.clone()
-                } else {
-                    format!("telegram.in:{}", chat_id)
-                };
-                // reply_to always goes back to Telegram so agent responses reach the chat.
-                let reply_to = format!("telegram.out:{}", chat_id);
-                let chat_name = names.get(&chat_id).cloned();
-
-                debug!(agent = %agent, chat_id = chat_id, "received Telegram message");
-
-                // Extract sender metadata from the Telegram message.
-                let sender_info = msg.from.as_ref().map(|u| SenderInfo {
-                    id: u.id.0,
-                    username: u.username.clone(),
-                    first_name: u.first_name.clone(),
-                    is_bot: u.is_bot,
-                });
-                let message_id = msg.id.0;
-                let reply_to_message_id = msg.reply_to_message().map(|r| r.id.0);
-                let reply_to_text = msg
-                    .reply_to_message()
-                    .and_then(|r| r.text().or_else(|| r.caption()).map(|s| s.to_string()));
-
-                if let Err(e) =
-                    publish_to_bus(&socket, &agent, &text, &target, &reply_to, chat_id, chat_name, image_base64.as_deref(), sender_info.as_ref(), message_id, reply_to_message_id, reply_to_text.as_deref())
-                        .await
-                {
-                    warn!(chat_id = chat_id, error = %e, "failed to publish message to bus");
-                    let _ = bot
-                        .send_message(msg.chat.id, "Internal error, please try again.")
-                        .await;
-                }
+            },
+            _ = cancel.cancelled() => {
+                info!(agent = %agent_name, "telegram polling loop cancelled");
+                break;
             }
-            Ok(())
+        };
+
+        for update in updates {
+            // Advance offset past this update so it won't be re-delivered.
+            next_offset = update.id.0 as i32 + 1;
+
+            if let teloxide::types::UpdateKind::Message(msg) = update.kind
+                && let Err(e) = handle_message(
+                    &bot,
+                    msg,
+                    &socket_path,
+                    &agent_name,
+                    &bot_username,
+                    &allowed_chats,
+                    &mention_only_chats,
+                    &chat_names,
+                    &chat_route_to,
+                    &admin_ids,
+                )
+                .await
+            {
+                warn!(agent = %agent_name, error = %e, "handle_message error");
+            }
         }
-    })
-    .await;
+    }
 
     Ok(())
 }

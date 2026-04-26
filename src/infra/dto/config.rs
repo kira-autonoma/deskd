@@ -16,7 +16,7 @@ pub use crate::domain::config_types::{ConfigAgentRuntime, ConfigContextConfig, C
 // ─── ModelDef / TransitionDef ───────────────────────────────────────────────
 
 /// Config-level state machine model definition (serde for YAML parsing).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConfigModelDef {
     pub name: String,
     #[serde(default)]
@@ -29,7 +29,7 @@ pub struct ConfigModelDef {
 }
 
 /// Config-level transition definition (serde for YAML parsing).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConfigTransitionDef {
     pub from: String,
     pub to: String,
@@ -58,7 +58,7 @@ pub struct ConfigTransitionDef {
 }
 
 /// Config-level task criteria (serde for YAML parsing).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ConfigTaskCriteria {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,

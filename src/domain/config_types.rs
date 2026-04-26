@@ -71,7 +71,7 @@ impl From<&AgentRuntime> for ConfigAgentRuntime {
 // ─── ContextConfig ─────────────────────────────────────────────────────────
 
 /// Config-level context configuration (serde for YAML parsing).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ConfigContextConfig {
     pub enabled: bool,
     pub main_budget_tokens: Option<u32>,

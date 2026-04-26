@@ -676,7 +676,7 @@ mod tests {
     #[test]
     fn pick_entry_returns_none_when_no_log_at_all() {
         // Empty session window AND empty full log → genuinely n/a.
-        let result = pick_entry_with_staleness(vec![], || vec![], true);
+        let result = pick_entry_with_staleness(vec![], Vec::new, true);
         assert!(result.is_none());
     }
 
