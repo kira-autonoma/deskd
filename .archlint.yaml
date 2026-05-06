@@ -22,15 +22,15 @@ rules:
     enabled: true
     error_on_violation: false
     level: telemetry
-    threshold: 5  # measured: ports::store TaskWriter=8 methods
+    threshold: 6  # measured: ports::store TaskWriter=8 methods
   max_lines:
     enabled: true
     error_on_violation: false
     level: telemetry
-    threshold: 800  # measured: mcp_tools=2296, worker=2041, workflow=1643, schedule=1258, graph=1384, config=1633, bus_api=1156, telegram=1481
+    threshold: 800  # measured: mcp_tools=2296, worker=2447, workflow=1643, schedule=1282, graph=1384, config=1731, bus_api=1159, telegram=1497
   shotgun_surgery:
     enabled: true
     error_on_violation: false
     level: telemetry
     threshold: 22  # measured: domain=56 dependents, app=43, config=25, infra=18
-# last reviewed: 2026-04-28
+# last reviewed: 2026-05-05
