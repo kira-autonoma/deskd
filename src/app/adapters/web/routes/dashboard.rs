@@ -1,4 +1,6 @@
-//! `GET /` — dashboard (#443). Redirects unauthenticated visitors to /login.
+//! `GET /` — dashboard (#443/#444). Redirects unauthenticated visitors to
+//! /login. Authenticated users get the live agent overview built from the
+//! existing registry/context_size/tasklog data sources (#444).
 
 use axum::{
     extract::State,
@@ -7,9 +9,11 @@ use axum::{
 };
 
 use crate::app::adapters::web::auth::session;
+use crate::app::adapters::web::data;
 use crate::app::adapters::web::routes::{SESSION_COOKIE_NAME, read_session_cookie};
 use crate::app::adapters::web::state::WebState;
 use crate::app::adapters::web::templates;
+use crate::app::adapters::web::view;
 
 pub async fn dashboard(State(state): State<WebState>, headers: HeaderMap) -> Response {
     let now = (state.now)();
@@ -18,7 +22,11 @@ pub async fn dashboard(State(state): State<WebState>, headers: HeaderMap) -> Res
 
     match session_payload {
         Some(p) => {
-            let html = templates::dashboard_page(p.telegram_id, &p.csrf);
+            let summaries = data::collect_agent_summaries().await;
+            let overview = data::collect_vps_overview();
+            let strip_html = view::vps_strip(&overview);
+            let agents_html = view::agents_section(&summaries);
+            let html = templates::dashboard_page(p.telegram_id, &p.csrf, &strip_html, &agents_html);
             html_response(html)
         }
         None => {

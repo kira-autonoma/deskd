@@ -1,0 +1,403 @@
+//! Agent card rendering (#444).
+//!
+//! Pure functions: take an `AgentSummary`, return an HTML fragment. The
+//! same renderer is used both for the initial server-side render and for
+//! SSE-driven htmx swaps so cards stay structurally consistent.
+
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+
+use crate::app::adapters::web::data::AgentSummary;
+
+use super::html_escape;
+
+/// Stable DOM id for an agent's card. Used by htmx for SSE swap targeting.
+pub fn agent_card_id(name: &str) -> String {
+    format!("agent-{}", sanitise_id(name))
+}
+
+/// Render a single agent card. The output is an `<article>` element wrapping
+/// every field listed in the issue spec.
+pub fn agent_card(summary: &AgentSummary) -> String {
+    let id = agent_card_id(&summary.name);
+    let status_class = status_class(&summary.status);
+    let status_label = html_escape(&summary.status);
+    let model = html_escape(&summary.model);
+    let last_activity = summary
+        .last_activity
+        .map(format_relative)
+        .unwrap_or_else(em_dash);
+    let context_line = render_context(summary);
+    let home_dir = summary
+        .home_dir_bytes
+        .map(format_bytes)
+        .unwrap_or_else(em_dash);
+    let task_block = render_task_block(summary);
+
+    format!(
+        r#"<article id="{id}" class="agent-card">
+  <header class="agent-card__head">
+    <h2 class="agent-card__name">{name}</h2>
+    <span class="agent-card__status agent-card__status--{status_class}">{status_label}</span>
+    <span class="agent-card__model">{model}</span>
+  </header>
+  <dl class="agent-card__rows">
+    <dt>last activity</dt><dd>{last_activity}</dd>
+    {context_line}
+    <dt>home dir</dt><dd>{home_dir}</dd>
+    {task_block}
+  </dl>
+</article>"#,
+        id = html_escape(&id),
+        name = html_escape(&summary.name),
+        status_class = status_class,
+        status_label = status_label,
+        model = model,
+        last_activity = last_activity,
+        context_line = context_line,
+        home_dir = home_dir,
+        task_block = task_block,
+    )
+}
+
+/// Render the agent list section (used by the initial dashboard render).
+/// Empty state is friendly: encourages the user to add an agent rather than
+/// looking like an error.
+pub fn agents_section(summaries: &[AgentSummary]) -> String {
+    if summaries.is_empty() {
+        return r#"<section class="agents agents--empty" hx-ext="sse" sse-connect="/events">
+  <p class="agents__empty">No agents configured. Add one in <code>workspace.yaml</code>.</p>
+</section>"#
+            .to_string();
+    }
+
+    let mut out = String::new();
+    out.push_str(r#"<section class="agents" hx-ext="sse" sse-connect="/events">"#);
+    out.push('\n');
+    for s in summaries {
+        out.push_str(&agent_card(s));
+        out.push('\n');
+    }
+    out.push_str("</section>");
+    out
+}
+
+fn render_context(summary: &AgentSummary) -> String {
+    match (summary.context_tokens, summary.context_threshold) {
+        (Some(tokens), Some(threshold)) if threshold > 0 => {
+            let pct = ((tokens as f64 / threshold as f64) * 100.0).clamp(0.0, 999.9);
+            let bar_pct = pct.min(100.0);
+            let used = format_tokens_compact(tokens);
+            let limit = format_tokens_compact(threshold);
+            format!(
+                r#"<dt>context</dt><dd>
+      <span class="ctx-numbers">{used} / {limit}</span>
+      <span class="ctx-bar"><span class="ctx-bar__fill" style="width: {bar_pct:.1}%"></span></span>
+      <span class="ctx-pct">{pct:.0}%</span>
+    </dd>"#,
+                used = html_escape(&used),
+                limit = html_escape(&limit),
+                bar_pct = bar_pct,
+                pct = pct,
+            )
+        }
+        _ => format!("<dt>context</dt><dd>{}</dd>", em_dash()),
+    }
+}
+
+fn render_task_block(summary: &AgentSummary) -> String {
+    match (&summary.current_task, summary.task_running_for) {
+        (Some(task), Some(dur)) => format!(
+            r#"<dt>current task</dt><dd>"{task}" <small>(running for {dur})</small></dd>"#,
+            task = html_escape(task),
+            dur = html_escape(&format_duration_short(dur)),
+        ),
+        (Some(task), None) => format!(
+            r#"<dt>current task</dt><dd>"{task}"</dd>"#,
+            task = html_escape(task),
+        ),
+        _ => String::new(),
+    }
+}
+
+fn status_class(status: &str) -> &'static str {
+    match status {
+        "working" => "working",
+        "offline" => "offline",
+        _ => "idle",
+    }
+}
+
+fn em_dash() -> String {
+    "<span class=\"em\">—</span>".to_string()
+}
+
+/// `123` → `123`, `1500` → `1.5k`, `300_000` → `300k`. Matches the
+/// formatting used by `/context` so dashboard and Telegram report the same.
+fn format_tokens_compact(n: u64) -> String {
+    if n < 1_000 {
+        return n.to_string();
+    }
+    let k = n as f64 / 1_000.0;
+    if k >= 10.0 {
+        format!("{}k", k.round() as u64)
+    } else {
+        let rounded = (k * 10.0).round() / 10.0;
+        if (rounded - rounded.round()).abs() < f64::EPSILON {
+            format!("{}k", rounded as u64)
+        } else {
+            format!("{:.1}k", rounded)
+        }
+    }
+}
+
+/// Format a relative time like "5s ago", "2 min ago", "3 h ago", "yesterday".
+pub fn format_relative(t: DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let delta = now.signed_duration_since(t);
+    let secs = delta.num_seconds();
+    if secs < 0 {
+        return "just now".to_string();
+    }
+    if secs < 5 {
+        return "just now".to_string();
+    }
+    if secs < 60 {
+        return format!("{}s ago", secs);
+    }
+    let mins = delta.num_minutes();
+    if mins < 60 {
+        return format!("{} min ago", mins);
+    }
+    let hours = delta.num_hours();
+    if hours < 24 {
+        return format!("{}h ago", hours);
+    }
+    let days = delta.num_days();
+    if days < 7 {
+        return format!("{}d ago", days);
+    }
+    t.format("%Y-%m-%d").to_string()
+}
+
+fn format_duration_short(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs < 60 {
+        return format!("{}s", secs);
+    }
+    let mins = secs / 60;
+    let rem = secs % 60;
+    if mins < 60 {
+        if rem == 0 {
+            return format!("{}m", mins);
+        }
+        return format!("{}m {}s", mins, rem);
+    }
+    let hours = mins / 60;
+    let rem_min = mins % 60;
+    if rem_min == 0 {
+        format!("{}h", hours)
+    } else {
+        format!("{}h {}m", hours, rem_min)
+    }
+}
+
+/// Format bytes with binary units. 1023 B, 1.5 KiB, 412 MiB, 4.2 GiB.
+pub fn format_bytes(b: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = KIB * 1024;
+    const GIB: u64 = MIB * 1024;
+    const TIB: u64 = GIB * 1024;
+    if b < KIB {
+        return format!("{} B", b);
+    }
+    if b < MIB {
+        return format!("{:.1} KiB", b as f64 / KIB as f64);
+    }
+    if b < GIB {
+        // Whole MiB for values >= 10 MiB, otherwise one decimal.
+        let mib = b as f64 / MIB as f64;
+        if mib >= 10.0 {
+            return format!("{} MiB", mib.round() as u64);
+        }
+        return format!("{:.1} MiB", mib);
+    }
+    if b < TIB {
+        return format!("{:.2} GiB", b as f64 / GIB as f64);
+    }
+    format!("{:.2} TiB", b as f64 / TIB as f64)
+}
+
+/// Replace anything that's not `[a-zA-Z0-9_-]` with `-` so agent names can
+/// safely appear in DOM ids.
+fn sanitise_id(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn summary(name: &str) -> AgentSummary {
+        AgentSummary {
+            name: name.into(),
+            status: "idle".into(),
+            model: "claude-opus-4-7".into(),
+            last_activity: None,
+            context_tokens: None,
+            context_threshold: None,
+            home_dir_bytes: None,
+            current_task: None,
+            task_running_for: None,
+        }
+    }
+
+    #[test]
+    fn agent_card_id_is_stable_and_safe() {
+        assert_eq!(agent_card_id("kira"), "agent-kira");
+        assert_eq!(agent_card_id("dev/sub-1"), "agent-dev-sub-1");
+    }
+
+    #[test]
+    fn empty_section_renders_friendly_message() {
+        let html = agents_section(&[]);
+        assert!(html.contains("No agents configured"));
+        assert!(html.contains("sse-connect=\"/events\""));
+    }
+
+    #[test]
+    fn card_renders_em_dash_for_missing_disk_size() {
+        let s = summary("kira");
+        let html = agent_card(&s);
+        assert!(html.contains(r#"id="agent-kira""#));
+        assert!(html.contains("home dir"));
+        // Em-dash wrapped in span for styling.
+        assert!(html.contains("—"));
+    }
+
+    #[test]
+    fn card_renders_context_progress_when_data_available() {
+        let mut s = summary("kira");
+        s.context_tokens = Some(120_000);
+        s.context_threshold = Some(300_000);
+        let html = agent_card(&s);
+        assert!(html.contains("120k / 300k"));
+        assert!(html.contains("ctx-bar__fill"));
+        // 120/300 = 40%.
+        assert!(html.contains("40%"));
+    }
+
+    #[test]
+    fn card_handles_above_100_percent_context_without_overflow() {
+        let mut s = summary("kira");
+        s.context_tokens = Some(450_000);
+        s.context_threshold = Some(300_000);
+        let html = agent_card(&s);
+        // Bar fill is clamped at 100% but the percentage label can exceed.
+        assert!(html.contains("width: 100.0%"));
+        assert!(html.contains("150%"));
+    }
+
+    #[test]
+    fn card_renders_current_task_with_duration() {
+        let mut s = summary("dev");
+        s.status = "working".into();
+        s.current_task = Some("review PR #441".into());
+        s.task_running_for = Some(Duration::from_secs(102));
+        let html = agent_card(&s);
+        assert!(html.contains(r#""review PR #441""#));
+        assert!(html.contains("running for 1m 42s"));
+    }
+
+    #[test]
+    fn card_skips_task_block_when_idle() {
+        let s = summary("kira");
+        let html = agent_card(&s);
+        assert!(!html.contains("current task"));
+    }
+
+    #[test]
+    fn card_status_uses_dedicated_class() {
+        let mut s = summary("kira");
+        s.status = "working".into();
+        let html = agent_card(&s);
+        assert!(html.contains("agent-card__status--working"));
+    }
+
+    #[test]
+    fn card_escapes_xss_in_user_supplied_fields() {
+        let mut s = summary("<x>");
+        s.current_task = Some("<script>alert(1)</script>".into());
+        s.task_running_for = Some(Duration::from_secs(1));
+        let html = agent_card(&s);
+        assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(html.contains("&lt;script&gt;"));
+        // Name appears in id (sanitised) and h2 (escaped).
+        assert!(html.contains("&lt;x&gt;"));
+    }
+
+    #[test]
+    fn agents_section_renders_one_card_per_agent() {
+        let summaries = vec![summary("a"), summary("b"), summary("c")];
+        let html = agents_section(&summaries);
+        assert!(html.contains(r#"id="agent-a""#));
+        assert!(html.contains(r#"id="agent-b""#));
+        assert!(html.contains(r#"id="agent-c""#));
+    }
+
+    #[test]
+    fn agents_section_handles_ten_agents_without_panic() {
+        // AC: «Page renders correctly with 0 agents, 1 agent, 10 agents.»
+        // The 0-agent case is covered by `empty_section_renders_friendly_message`
+        // and the 1-agent case by the various single-card tests above; this
+        // verifies the upper bound from the issue spec.
+        let mut summaries = Vec::with_capacity(10);
+        for i in 0..10 {
+            let mut s = summary(&format!("agent-{}", i));
+            s.context_tokens = Some(1_000 * (i as u64 + 1) * 30);
+            s.context_threshold = Some(300_000);
+            s.home_dir_bytes = Some(412 * 1024 * 1024);
+            summaries.push(s);
+        }
+        let html = agents_section(&summaries);
+        for i in 0..10 {
+            assert!(
+                html.contains(&format!(r#"id="agent-agent-{}""#, i)),
+                "missing card for agent-{}",
+                i
+            );
+        }
+        // Spot-check that disk size renders.
+        assert!(html.contains("412 MiB"));
+    }
+
+    #[test]
+    fn format_bytes_buckets() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1024), "1.0 KiB");
+        assert_eq!(format_bytes(2_097_152), "2.0 MiB");
+        assert_eq!(format_bytes(11 * 1024 * 1024), "11 MiB");
+        // 412 MiB target from the issue mockup.
+        assert_eq!(format_bytes(412 * 1024 * 1024), "412 MiB");
+    }
+
+    #[test]
+    fn format_relative_buckets() {
+        let now = Utc::now();
+        assert_eq!(format_relative(now), "just now");
+        assert!(format_relative(now - chrono::Duration::seconds(30)).ends_with("s ago"));
+        assert!(format_relative(now - chrono::Duration::minutes(5)).contains("min ago"));
+        assert!(format_relative(now - chrono::Duration::hours(3)).ends_with("h ago"));
+    }
+}
