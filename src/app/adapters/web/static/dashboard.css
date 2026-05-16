@@ -1,0 +1,53 @@
+/* Dashboard CSS for the web adapter (#444).
+ *
+ * Served from /static/dashboard.css so the strict CSP from #443
+ * (style-src 'self') stays intact — no inline <style> elements, no
+ * inline style="" attributes. The progress-bar fill uses width-bucket
+ * classes (--w-0 … --w-100 in 10% steps) instead of a dynamic
+ * style="width: X%" attribute. */
+
+* { box-sizing: border-box; }
+body { margin: 0; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; color: #1a1a1a; background: #f6f7fa; }
+.topbar { display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 1rem; background: #1a1a1a; color: #f6f7fa; }
+.topbar h1 { margin: 0; font-size: 1.1rem; flex: 0 0 auto; }
+.topbar__user { font-size: 0.8rem; opacity: 0.7; flex: 1 1 auto; }
+.topbar__logout { margin: 0; }
+.topbar__logout button { background: transparent; color: inherit; border: 1px solid #555; border-radius: 4px; padding: 0.25rem 0.6rem; font: inherit; }
+main { padding: 0.75rem; max-width: 720px; margin: 0 auto; }
+.vps-strip { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; padding: 0.6rem 0.75rem; margin-bottom: 0.75rem; background: #fff; border: 1px solid #e0e3eb; border-radius: 8px; font-size: 0.85rem; }
+.vps-strip__item strong { color: #555; font-weight: 600; margin-right: 0.25rem; }
+.agents { display: flex; flex-direction: column; gap: 0.6rem; }
+.agents--empty .agents__empty { padding: 1.5rem 1rem; text-align: center; background: #fff; border: 1px dashed #c5c9d4; border-radius: 8px; color: #666; }
+.agent-card { background: #fff; border: 1px solid #e0e3eb; border-radius: 8px; padding: 0.75rem 0.9rem; }
+.agent-card__head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem 0.6rem; margin-bottom: 0.4rem; }
+.agent-card__name { margin: 0; font-size: 1rem; font-weight: 600; }
+.agent-card__status { font-size: 0.75rem; padding: 0.1rem 0.45rem; border-radius: 999px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.agent-card__status--idle { background: #eef0f5; color: #555; }
+.agent-card__status--working { background: #e6f4ea; color: #1e7e34; }
+.agent-card__status--offline { background: #fbeaea; color: #b02929; }
+.agent-card__model { font-size: 0.75rem; color: #777; margin-left: auto; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+.agent-card__rows { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 0.2rem 0.75rem; font-size: 0.85rem; }
+.agent-card__rows dt { color: #666; }
+.agent-card__rows dd { margin: 0; }
+.ctx-numbers { font-variant-numeric: tabular-nums; }
+.ctx-bar { display: inline-block; width: 100px; height: 6px; background: #e0e3eb; border-radius: 3px; vertical-align: middle; margin: 0 0.4rem; overflow: hidden; }
+.ctx-bar__fill { display: block; height: 100%; background: #4a72d9; transition: width 0.3s ease; }
+.ctx-bar__fill--w-0   { width: 0%; }
+.ctx-bar__fill--w-10  { width: 10%; }
+.ctx-bar__fill--w-20  { width: 20%; }
+.ctx-bar__fill--w-30  { width: 30%; }
+.ctx-bar__fill--w-40  { width: 40%; }
+.ctx-bar__fill--w-50  { width: 50%; }
+.ctx-bar__fill--w-60  { width: 60%; }
+.ctx-bar__fill--w-70  { width: 70%; }
+.ctx-bar__fill--w-80  { width: 80%; }
+.ctx-bar__fill--w-90  { width: 90%; }
+.ctx-bar__fill--w-100 { width: 100%; }
+.ctx-pct { font-variant-numeric: tabular-nums; color: #555; }
+.em { color: #aaa; }
+small { color: #777; }
+@media (max-width: 420px) {
+  .agent-card__rows { grid-template-columns: 1fr; gap: 0.05rem 0; }
+  .agent-card__rows dt { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em; margin-top: 0.3rem; }
+  .ctx-bar { width: 80px; }
+}

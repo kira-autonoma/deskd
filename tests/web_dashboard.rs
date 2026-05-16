@@ -230,6 +230,39 @@ async fn static_htmx_sse_extension_served_with_js_content_type() {
     assert!(body.contains("Server Sent Events Extension"));
 }
 
+#[tokio::test]
+async fn static_dashboard_css_served_with_css_content_type() {
+    // CSP-regression guard: the dashboard stylesheet has to be served as
+    // a same-origin asset (no inline <style>) so `style-src 'self'` is
+    // sufficient.
+    let (state, _disp, _dir) = build_state();
+    let app = router::build(state);
+    let req = req_with_peer(
+        Request::get("/static/dashboard.css")
+            .body(Body::empty())
+            .unwrap(),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        ct.starts_with("text/css"),
+        "expected text/css content-type, got {}",
+        ct
+    );
+    let body = body_string(resp).await;
+    assert!(!body.is_empty(), "dashboard.css body must be non-empty");
+    // Sanity: bucket classes that replaced the inline `style="width: X%"`.
+    assert!(body.contains(".ctx-bar__fill--w-0"));
+    assert!(body.contains(".ctx-bar__fill--w-100"));
+}
+
 // ─── dashboard rendering (page-level smoke checks) ──────────────────────
 
 #[tokio::test]
@@ -265,4 +298,70 @@ async fn dashboard_renders_vps_strip_and_agents_section() {
     assert!(body.contains(r#"src="/static/htmx-sse.js""#));
     // SSE wiring on the agent section.
     assert!(body.contains("sse-connect=\"/events\""));
+    // CSP-regression guard: stylesheet has to be linked, not inlined.
+    assert!(body.contains(r#"<link rel="stylesheet" href="/static/dashboard.css">"#));
+}
+
+#[tokio::test]
+async fn dashboard_body_contains_no_inline_styles() {
+    // Reviewer-requested regression guard (#450 review): the strict CSP
+    // from #443/#448 (`style-src 'self'`) does NOT permit inline `<style>`
+    // elements or `style=` attributes. If either ever sneaks back in,
+    // production loads unstyled.
+    //
+    // The integration test below covers the page-level template via a
+    // real `GET /`; cards are covered separately because the registry is
+    // empty in tests (no seeding helper today). We grep the rendered card
+    // HTML directly to extend coverage to the per-agent renderer.
+    use deskd::app::adapters::web::view::cards::agents_section;
+    use std::time::Duration;
+
+    // (a) Page-level template via the real router.
+    let (state, _disp, _dir) = build_state();
+    let cookie = auth_cookie(&state);
+    let app = router::build(state);
+    let req = req_with_peer(
+        Request::get("/")
+            .header(
+                header::COOKIE,
+                format!("{}={}", SESSION_COOKIE_NAME, cookie),
+            )
+            .body(Body::empty())
+            .unwrap(),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let page_body = body_string(resp).await;
+
+    // (b) Card-level renderer with the same fields production exercises.
+    let card_summary = AgentSummary {
+        name: "agent-seed".into(),
+        status: "working".into(),
+        model: "claude-opus-4-7".into(),
+        last_activity: None,
+        context_tokens: Some(123_456),
+        context_threshold: Some(300_000),
+        home_dir_bytes: Some(412 * 1024 * 1024),
+        current_task: Some("inline-style regression check".into()),
+        task_running_for: Some(Duration::from_secs(102)),
+    };
+    let cards_html = agents_section(&[card_summary]);
+    let combined = format!("{}\n{}", page_body, cards_html);
+    let lower = combined.to_ascii_lowercase();
+
+    // 1) No inline <style> elements.
+    assert!(
+        !lower.contains("<style>") && !lower.contains("<style "),
+        "dashboard HTML must contain no inline <style> elements"
+    );
+    // 2) No `style=` attributes anywhere — neither `style="…"` nor
+    //    `style='…'`, regardless of case.
+    assert!(
+        !lower.contains("style=\""),
+        "dashboard HTML must contain no inline style=\"…\" attributes"
+    );
+    assert!(
+        !lower.contains("style='"),
+        "dashboard HTML must contain no inline style='…' attributes"
+    );
 }

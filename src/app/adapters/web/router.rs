@@ -22,6 +22,7 @@ pub fn build(state: WebState) -> Router {
         .route("/logout", post(logout::logout))
         .route("/static/htmx.min.js", get(static_assets::htmx_js))
         .route("/static/htmx-sse.js", get(static_assets::htmx_sse_js))
+        .route("/static/dashboard.css", get(static_assets::dashboard_css))
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
 }

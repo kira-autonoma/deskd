@@ -88,22 +88,39 @@ fn render_context(summary: &AgentSummary) -> String {
         (Some(tokens), Some(threshold)) if threshold > 0 => {
             let pct = ((tokens as f64 / threshold as f64) * 100.0).clamp(0.0, 999.9);
             let bar_pct = pct.min(100.0);
+            let bucket = nearest_bucket_class(bar_pct);
             let used = format_tokens_compact(tokens);
             let limit = format_tokens_compact(threshold);
+            // No inline `style=` attribute: width comes from the bucket
+            // class (`.ctx-bar__fill--w-0` … `--w-100` in 10% steps) so
+            // the strict CSP from #443 holds. See #450 review.
             format!(
                 r#"<dt>context</dt><dd>
       <span class="ctx-numbers">{used} / {limit}</span>
-      <span class="ctx-bar"><span class="ctx-bar__fill" style="width: {bar_pct:.1}%"></span></span>
+      <span class="ctx-bar"><span class="ctx-bar__fill ctx-bar__fill--w-{bucket}"></span></span>
       <span class="ctx-pct">{pct:.0}%</span>
     </dd>"#,
                 used = html_escape(&used),
                 limit = html_escape(&limit),
-                bar_pct = bar_pct,
+                bucket = bucket,
                 pct = pct,
             )
         }
         _ => format!("<dt>context</dt><dd>{}</dd>", em_dash()),
     }
+}
+
+/// Pick the nearest 10%-bucket class for the progress-bar fill. Returns
+/// one of 0, 10, 20, …, 100. Values below 5% snap to 0; values at or above
+/// 95% snap to 100. Eliminates the inline `style="width: X%"` attribute
+/// that the strict CSP from #443 (`style-src 'self'`) would otherwise
+/// reject.
+fn nearest_bucket_class(pct: f64) -> u8 {
+    let clamped = pct.clamp(0.0, 100.0);
+    // Round to nearest 10% via `(x + 5) / 10 * 10` semantics. `as u8`
+    // truncates, which is fine because clamped ≤ 100.
+    let bucket = ((clamped + 5.0) / 10.0) as u8 * 10;
+    bucket.min(100)
 }
 
 fn render_task_block(summary: &AgentSummary) -> String {
@@ -292,8 +309,9 @@ mod tests {
         s.context_threshold = Some(300_000);
         let html = agent_card(&s);
         assert!(html.contains("120k / 300k"));
-        assert!(html.contains("ctx-bar__fill"));
-        // 120/300 = 40%.
+        // 120/300 = 40% → bucket class --w-40 (no inline `style=` attr).
+        assert!(html.contains("ctx-bar__fill--w-40"));
+        assert!(!html.contains("style=\"width"));
         assert!(html.contains("40%"));
     }
 
@@ -303,9 +321,26 @@ mod tests {
         s.context_tokens = Some(450_000);
         s.context_threshold = Some(300_000);
         let html = agent_card(&s);
-        // Bar fill is clamped at 100% but the percentage label can exceed.
-        assert!(html.contains("width: 100.0%"));
+        // Bar fill is clamped at 100% bucket; numeric label can exceed.
+        assert!(html.contains("ctx-bar__fill--w-100"));
+        assert!(!html.contains("style=\"width"));
         assert!(html.contains("150%"));
+    }
+
+    #[test]
+    fn nearest_bucket_class_snaps_to_ten_percent_steps() {
+        // Boundary points: <5 → 0, ≥5 → 10, … ≥95 → 100.
+        assert_eq!(nearest_bucket_class(0.0), 0);
+        assert_eq!(nearest_bucket_class(4.999), 0);
+        assert_eq!(nearest_bucket_class(5.0), 10);
+        assert_eq!(nearest_bucket_class(14.999), 10);
+        assert_eq!(nearest_bucket_class(15.0), 20);
+        assert_eq!(nearest_bucket_class(49.0), 50);
+        assert_eq!(nearest_bucket_class(94.999), 90);
+        assert_eq!(nearest_bucket_class(95.0), 100);
+        assert_eq!(nearest_bucket_class(100.0), 100);
+        // Defensive: anything over 100 still maps to 100 (caller clamps).
+        assert_eq!(nearest_bucket_class(150.0), 100);
     }
 
     #[test]
