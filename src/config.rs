@@ -12,15 +12,28 @@ pub use crate::infra::paths::{
     agent_bus_socket, ensure_dir_owned, log_dir, reminders_dir, state_dir,
 };
 
-/// A one-shot reminder that fires at a specific time and posts a message to the bus.
+/// A reminder that fires at a specific time and posts a message to the bus.
+///
+/// One-shot when neither `interval` nor `cron_expression` is set (legacy
+/// semantics). When `interval` or `cron_expression` is present, the reminder
+/// reschedules itself after each fire — the source string is persisted so the
+/// scheduler can re-parse after a deskd restart.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RemindDef {
-    /// ISO 8601 timestamp at which to fire.
+    /// ISO 8601 timestamp at which to fire next.
     pub at: String,
     /// Bus target (e.g. `agent:kira`).
     pub target: String,
     /// Payload text to post.
     pub message: String,
+    /// Recurring interval as a duration string (e.g. "30m", "2h", "1d").
+    /// Mutually exclusive with `cron_expression`. Min effective tick: 1 minute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval: Option<String>,
+    /// Recurring cron expression (5-field UTC). Mutually exclusive with
+    /// `interval`. Min effective tick: 1 minute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cron_expression: Option<String>,
 }
 
 fn default_max_turns() -> u32 {

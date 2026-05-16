@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use tracing::info;
 
 use crate::app::statemachine;
@@ -21,11 +22,122 @@ use crate::ports::store::{StateMachineRepository, TaskRepository};
 
 // ─── Reminder ────────────────────────────────────────────────────────────────
 
+/// How a reminder reschedules itself after firing.
+///
+/// `OneShot` preserves legacy behaviour — the reminder is deleted after fire.
+/// `Interval` and `Cron` re-arm the reminder; the source string lives on the
+/// `RemindDef` row so deskd-restart re-parses it.
+#[derive(Debug, Clone)]
+pub enum ScheduleKind {
+    OneShot,
+    Interval(std::time::Duration),
+    Cron(Box<cron::Schedule>),
+}
+
+impl ScheduleKind {
+    /// Stable label used in MCP `list_reminders` output.
+    pub fn label(&self) -> &'static str {
+        match self {
+            ScheduleKind::OneShot => "one_shot",
+            ScheduleKind::Interval(_) => "interval",
+            ScheduleKind::Cron(_) => "cron",
+        }
+    }
+
+    /// Compute the next fire time strictly after `now` for a recurring kind.
+    /// `OneShot` returns `None` — callers delete the reminder instead.
+    ///
+    /// For `Interval`, jumps forward by whole intervals from `last_fire` so
+    /// missed firings collapse to one ("fire-once-and-move-on" restart-storm
+    /// policy from #455).
+    pub fn next_after(
+        &self,
+        last_fire: chrono::DateTime<chrono::Utc>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        match self {
+            ScheduleKind::OneShot => None,
+            ScheduleKind::Interval(dur) => {
+                let interval = chrono::Duration::from_std(*dur).ok()?;
+                if interval <= chrono::Duration::zero() {
+                    return None;
+                }
+                let mut next = last_fire + interval;
+                if next <= now {
+                    // Collapse missed firings to a single re-arm.
+                    let elapsed = (now - last_fire).num_milliseconds().max(0);
+                    let step = interval.num_milliseconds().max(1);
+                    let skips = (elapsed / step) + 1;
+                    next = last_fire + chrono::Duration::milliseconds(skips * step);
+                }
+                Some(next)
+            }
+            ScheduleKind::Cron(schedule) => {
+                // cron::Schedule::after returns the next occurrences strictly
+                // after the given anchor. We want strictly after `now` so a
+                // deskd restart that lost time still re-arms to the future.
+                schedule.after(&now).next()
+            }
+        }
+    }
+}
+
+/// Parse the optional recurring fields on a reminder into a `ScheduleKind`,
+/// returning an MCP-shaped error if validation fails (#455).
+///
+/// Rules:
+/// - `interval` and `cron_expression` are mutually exclusive.
+/// - `interval` parses via the shared duration parser; must be >= 60 seconds.
+/// - `cron_expression` must be 5-field; 6-field (with seconds) is rejected.
+pub fn parse_schedule_kind(
+    interval: Option<&str>,
+    cron_expression: Option<&str>,
+) -> Result<ScheduleKind> {
+    match (interval, cron_expression) {
+        (Some(_), Some(_)) => {
+            bail!("interval and cron_expression are mutually exclusive — pass only one")
+        }
+        (Some(s), None) => {
+            let secs = crate::app::commands::parse_duration_secs(s)
+                .with_context(|| format!("invalid interval: {:?}", s))?;
+            if secs < 60 {
+                bail!(
+                    "interval must be >= 1m (got {:?} = {}s); deskd does not support sub-minute reminders",
+                    s,
+                    secs
+                );
+            }
+            Ok(ScheduleKind::Interval(std::time::Duration::from_secs(secs)))
+        }
+        (None, Some(expr)) => {
+            // Reject 6-field cron (includes seconds). Field count is counted
+            // by whitespace-separated tokens.
+            let fields = expr.split_whitespace().count();
+            if fields != 5 {
+                bail!(
+                    "cron_expression must be 5 fields (minute hour day month weekday), got {} field(s) in {:?}",
+                    fields,
+                    expr
+                );
+            }
+            // The `cron` crate expects a leading seconds field. Prepend "0"
+            // so we keep cron's minute-floor semantics.
+            let normalized = format!("0 {}", expr);
+            let schedule = cron::Schedule::from_str(&normalized)
+                .with_context(|| format!("invalid cron_expression {:?}", expr))?;
+            Ok(ScheduleKind::Cron(Box::new(schedule)))
+        }
+        (None, None) => Ok(ScheduleKind::OneShot),
+    }
+}
+
 /// Result of creating a reminder.
+#[derive(Debug)]
 pub struct ReminderCreated {
     pub target: String,
     pub fire_at: String,
     pub delay_minutes: f64,
+    pub schedule_kind: &'static str,
 }
 
 /// Create a one-shot reminder persisted to disk.
@@ -41,13 +153,49 @@ pub fn create_reminder_at(
     message: &str,
     fire_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<ReminderCreated> {
+    create_reminder_full(target, message, Some(fire_at), None, None)
+}
+
+/// Create a reminder with optional recurring schedule.
+///
+/// When `interval` or `cron_expression` is set, the reminder reschedules
+/// itself after each fire. If `fire_at` is `None` and a recurring kind is
+/// supplied, the first fire time is computed from "now":
+///   - `interval` → `now + interval`
+///   - `cron_expression` → next cron occurrence after now
+///
+/// `interval` and `cron_expression` are mutually exclusive (validated by
+/// `parse_schedule_kind`).
+pub fn create_reminder_full(
+    target: &str,
+    message: &str,
+    fire_at: Option<chrono::DateTime<chrono::Utc>>,
+    interval: Option<&str>,
+    cron_expression: Option<&str>,
+) -> Result<ReminderCreated> {
+    let kind = parse_schedule_kind(interval, cron_expression)?;
     let now = chrono::Utc::now();
-    let delay_minutes = (fire_at - now).num_seconds() as f64 / 60.0;
+    let resolved_fire_at = match (fire_at, &kind) {
+        (Some(t), _) => t,
+        (None, ScheduleKind::OneShot) => {
+            bail!("create_reminder requires a fire time (at/in/delay_minutes) when not recurring")
+        }
+        (None, ScheduleKind::Interval(d)) => {
+            now + chrono::Duration::from_std(*d).unwrap_or(chrono::Duration::zero())
+        }
+        (None, ScheduleKind::Cron(schedule)) => schedule.after(&now).next().ok_or_else(|| {
+            anyhow::anyhow!("cron_expression has no upcoming occurrences after now")
+        })?,
+    };
+
+    let delay_minutes = (resolved_fire_at - now).num_seconds() as f64 / 60.0;
 
     let remind = crate::config::RemindDef {
-        at: fire_at.to_rfc3339(),
+        at: resolved_fire_at.to_rfc3339(),
         target: target.to_string(),
         message: message.to_string(),
+        interval: interval.map(|s| s.to_string()),
+        cron_expression: cron_expression.map(|s| s.to_string()),
     };
 
     let dir = crate::config::reminders_dir();
@@ -58,12 +206,13 @@ pub fn create_reminder_at(
     std::fs::write(&path, json)
         .with_context(|| format!("failed to write reminder file: {}", path.display()))?;
 
-    info!(target = %target, at = %fire_at, "create_reminder");
+    info!(target = %target, at = %resolved_fire_at, kind = kind.label(), "create_reminder");
 
     Ok(ReminderCreated {
         target: target.to_string(),
-        fire_at: fire_at.to_rfc3339(),
+        fire_at: resolved_fire_at.to_rfc3339(),
         delay_minutes,
+        schedule_kind: kind.label(),
     })
 }
 
@@ -164,11 +313,22 @@ pub fn list_reminders(
     Ok(filtered
         .take(limit)
         .map(|r| {
+            let kind_label = match parse_schedule_kind(
+                r.def.interval.as_deref(),
+                r.def.cron_expression.as_deref(),
+            ) {
+                Ok(k) => k.label(),
+                Err(_) => "one_shot",
+            };
             json!({
                 "id": r.id,
                 "at": r.def.at,
+                "next_fire_at": r.def.at,
                 "target": r.def.target,
                 "message_preview": message_preview(&r.def.message, 120),
+                "schedule_kind": kind_label,
+                "interval": r.def.interval,
+                "cron_expression": r.def.cron_expression,
             })
         })
         .collect())
@@ -201,11 +361,20 @@ pub fn get_reminder(id: &str) -> Result<Value> {
         std::fs::read_to_string(&path).with_context(|| format!("reminder not found: {}", id))?;
     let def: crate::config::RemindDef =
         serde_json::from_str(&content).context("failed to parse reminder file")?;
+    let kind_label =
+        match parse_schedule_kind(def.interval.as_deref(), def.cron_expression.as_deref()) {
+            Ok(k) => k.label(),
+            Err(_) => "one_shot",
+        };
     Ok(json!({
         "id": id,
         "at": def.at,
+        "next_fire_at": def.at,
         "target": def.target,
         "message": def.message,
+        "schedule_kind": kind_label,
+        "interval": def.interval,
+        "cron_expression": def.cron_expression,
     }))
 }
 

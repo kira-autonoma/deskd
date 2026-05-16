@@ -385,7 +385,7 @@ fn handle_tools_list(
 
     tools.push(json!({
         "name": "create_reminder",
-        "description": "Schedule a one-shot reminder. Specify time with 'at' (datetime/time string), 'in' (duration like 30m/1h/2h30m), or 'delay_minutes' (number). Exactly one time param required.",
+        "description": "Schedule a reminder (one-shot or recurring). One-shot: specify the time with 'at', 'in', or 'delay_minutes'. Recurring: pass 'interval' (e.g. \"30m\") or 'cron_expression' (5-field UTC); both are mutually exclusive and have a 1-minute minimum tick. Recurring reminders survive deskd restart and re-arm themselves after each fire — use 'cancel_reminder' to stop the loop.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -408,6 +408,14 @@ fn handle_tools_list(
                 "delay_minutes": {
                     "type": "number",
                     "description": "Minutes from now (legacy, prefer 'at' or 'in')"
+                },
+                "interval": {
+                    "type": "string",
+                    "description": "Recurring interval (e.g. \"30m\", \"2h\", \"1d\"). Minimum 1m. Mutually exclusive with cron_expression."
+                },
+                "cron_expression": {
+                    "type": "string",
+                    "description": "5-field UTC cron expression (minute hour day month weekday). Minimum tick 1 minute. Mutually exclusive with interval."
                 }
             },
             "required": ["target", "message"]

@@ -856,87 +856,143 @@ async fn fire_shell(
 ///
 /// Each reminder is a JSON file (`RemindDef`) written by `deskd remind` or the
 /// `create_reminder` MCP tool. When the `at` timestamp is <= now, the reminder
-/// is fired (message posted to bus) and the file is deleted.
+/// is fired (message posted to bus). After firing:
+///   - one-shot (`interval`/`cron_expression` both absent) → file deleted
+///   - `interval` → `at` advanced to the next future occurrence; file kept
+///   - `cron_expression` → `at` advanced to the next cron tick; file kept
+///
+/// Restart-storm policy: a recurring reminder whose `at` is in the past (e.g.
+/// deskd was offline for hours) fires ONCE and is then re-armed to the next
+/// future occurrence — never replays all missed ticks. See #455.
 pub async fn run_reminders(bus_socket: String, agent_name: String) {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        fire_due_reminders(&bus_socket, &agent_name, Utc::now()).await;
+    }
+}
 
-        let dir = crate::config::reminders_dir();
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
+/// Single-pass reminder scan, factored out so tests can drive it with a fixed
+/// "now" without sleeping for 10 seconds.
+pub async fn fire_due_reminders(
+    bus_socket: &str,
+    agent_name: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) {
+    let dir = crate::config::reminders_dir();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) => {
+            warn!(agent = %agent_name, error = %e, "failed to read reminders dir");
+            return;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
             Err(e) => {
-                warn!(agent = %agent_name, error = %e, "failed to read reminders dir");
+                warn!(agent = %agent_name, path = %path.display(), error = %e, "failed to read reminder file");
                 continue;
             }
         };
 
-        let now = Utc::now();
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+        let reminder: crate::config::RemindDef = match serde_json::from_str(&content) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(agent = %agent_name, path = %path.display(), error = %e, "failed to parse reminder file");
                 continue;
             }
+        };
 
-            let content = match std::fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(e) => {
-                    warn!(agent = %agent_name, path = %path.display(), error = %e, "failed to read reminder file");
-                    continue;
-                }
-            };
-
-            let reminder: crate::config::RemindDef = match serde_json::from_str(&content) {
-                Ok(r) => r,
-                Err(e) => {
-                    warn!(agent = %agent_name, path = %path.display(), error = %e, "failed to parse reminder file");
-                    continue;
-                }
-            };
-
-            let fire_at = match chrono::DateTime::parse_from_rfc3339(&reminder.at) {
-                Ok(t) => t.with_timezone(&chrono::Utc),
-                Err(e) => {
-                    warn!(agent = %agent_name, path = %path.display(), error = %e, "invalid reminder timestamp");
-                    continue;
-                }
-            };
-
-            if fire_at > now {
-                // Not yet due.
+        let fire_at = match chrono::DateTime::parse_from_rfc3339(&reminder.at) {
+            Ok(t) => t.with_timezone(&chrono::Utc),
+            Err(e) => {
+                warn!(agent = %agent_name, path = %path.display(), error = %e, "invalid reminder timestamp");
                 continue;
             }
+        };
 
-            info!(agent = %agent_name, target = %reminder.target, "firing reminder");
+        if fire_at > now {
+            // Not yet due.
+            continue;
+        }
 
-            // Write to unified inbox
-            let inbox_name = format!("schedule/{}-reminder", agent_name);
-            let inbox_msg = unified_inbox::InboxMessage {
-                ts: chrono::Utc::now(),
-                source: "reminder".to_string(),
-                from: None,
-                text: reminder.message.clone(),
-                metadata: serde_json::json!({
-                    "target": reminder.target,
-                    "scheduled_at": reminder.at,
-                }),
-            };
-            if let Err(e) = unified_inbox::write_message(&inbox_name, &inbox_msg) {
-                warn!(agent = %agent_name, error = %e, "failed to write reminder to unified inbox");
+        info!(agent = %agent_name, target = %reminder.target, "firing reminder");
+
+        // Write to unified inbox
+        let inbox_name = format!("schedule/{}-reminder", agent_name);
+        let inbox_msg = unified_inbox::InboxMessage {
+            ts: chrono::Utc::now(),
+            source: "reminder".to_string(),
+            from: None,
+            text: reminder.message.clone(),
+            metadata: serde_json::json!({
+                "target": reminder.target,
+                "scheduled_at": reminder.at,
+            }),
+        };
+        if let Err(e) = unified_inbox::write_message(&inbox_name, &inbox_msg) {
+            warn!(agent = %agent_name, error = %e, "failed to write reminder to unified inbox");
+        }
+
+        let delivery = post_to_bus(
+            bus_socket,
+            agent_name,
+            &reminder.target,
+            &reminder.message,
+            "reminder",
+        )
+        .await;
+
+        if let Err(e) = delivery {
+            warn!(agent = %agent_name, target = %reminder.target, error = %e, "failed to fire reminder");
+            // Leave the file in place — next tick will retry. For recurring
+            // reminders this also avoids skipping an interval on a transient
+            // bus failure.
+            continue;
+        }
+
+        // Decide what to do with the file: delete (one-shot) or re-arm (recurring).
+        let kind = crate::app::mcp_service::parse_schedule_kind(
+            reminder.interval.as_deref(),
+            reminder.cron_expression.as_deref(),
+        );
+
+        let next = match &kind {
+            Ok(k) => k.next_after(fire_at, now),
+            Err(e) => {
+                warn!(agent = %agent_name, path = %path.display(), error = %e, "invalid recurring reminder fields; treating as one-shot");
+                None
             }
+        };
 
-            if let Err(e) = post_to_bus(
-                &bus_socket,
-                &agent_name,
-                &reminder.target,
-                &reminder.message,
-                "reminder",
-            )
-            .await
-            {
-                warn!(agent = %agent_name, target = %reminder.target, error = %e, "failed to fire reminder");
-            } else {
-                // Delete the file after successful delivery.
+        match next {
+            Some(next_at) => {
+                let mut updated = reminder.clone();
+                updated.at = next_at.to_rfc3339();
+                match serde_json::to_string_pretty(&updated) {
+                    Ok(json_text) => {
+                        let tmp_path = path.with_extension("json.tmp");
+                        if let Err(e) = std::fs::write(&tmp_path, json_text) {
+                            warn!(agent = %agent_name, path = %tmp_path.display(), error = %e, "failed to write reminder tmp file");
+                        } else if let Err(e) = std::fs::rename(&tmp_path, &path) {
+                            warn!(agent = %agent_name, path = %path.display(), error = %e, "failed to rename reminder tmp file");
+                        } else {
+                            info!(agent = %agent_name, target = %updated.target, next = %updated.at, "recurring reminder re-armed");
+                        }
+                    }
+                    Err(e) => {
+                        warn!(agent = %agent_name, error = %e, "failed to serialize updated reminder");
+                    }
+                }
+            }
+            None => {
+                // One-shot — delete after successful delivery.
                 if let Err(e) = std::fs::remove_file(&path) {
                     warn!(agent = %agent_name, path = %path.display(), error = %e, "failed to delete reminder file");
                 }

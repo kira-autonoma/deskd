@@ -593,35 +593,63 @@ pub(crate) async fn call_create_reminder(args: &Value) -> Result<Value> {
         .and_then(|m| m.as_str())
         .context("missing message")?;
 
-    // Support three time specification modes (exactly one required):
-    // 1. "at" — ISO 8601 timestamp or human-friendly time string
-    // 2. "in" — duration string like "30m", "1h", "2h30m"
-    // 3. "delay_minutes" — legacy numeric minutes (backwards compat)
+    // Time specification modes:
+    //   "at"             — ISO 8601 / human-friendly time string
+    //   "in"             — duration string like "30m"
+    //   "delay_minutes"  — legacy numeric minutes
+    // Recurring modes (#455, mutually exclusive with each other):
+    //   "interval"        — fires every <duration> (min 1m)
+    //   "cron_expression" — 5-field UTC cron, fires per schedule
+    // For recurring reminders the absolute time params (at/in/delay_minutes)
+    // are optional — the first fire defaults to now+interval or the next
+    // cron occurrence.
     let at_str = args.get("at").and_then(|a| a.as_str());
     let in_str = args.get("in").and_then(|i| i.as_str());
     let delay_minutes = args.get("delay_minutes").and_then(|d| d.as_f64());
+    let interval = args.get("interval").and_then(|v| v.as_str());
+    let cron_expression = args.get("cron_expression").and_then(|v| v.as_str());
 
-    let result = if let Some(at) = at_str {
-        let fire_at = parse_at_time(at)?;
-        mcp_service::create_reminder_at(target, message, fire_at)?
+    let fire_at_override: Option<chrono::DateTime<chrono::Utc>> = if let Some(at) = at_str {
+        Some(parse_at_time(at)?)
     } else if let Some(dur) = in_str {
         let secs = crate::app::commands::parse_duration_secs(dur)?;
-        let delay = secs as f64 / 60.0;
-        mcp_service::create_reminder(target, message, delay)?
-    } else if let Some(mins) = delay_minutes {
-        mcp_service::create_reminder(target, message, mins)?
+        Some(chrono::Utc::now() + chrono::Duration::seconds(secs as i64))
     } else {
-        bail!("create_reminder requires one of: 'at', 'in', or 'delay_minutes'");
+        delay_minutes.map(|mins| {
+            chrono::Utc::now() + chrono::Duration::seconds((mins * 60.0).round() as i64)
+        })
+    };
+
+    let is_recurring = interval.is_some() || cron_expression.is_some();
+    if fire_at_override.is_none() && !is_recurring {
+        bail!(
+            "create_reminder requires one of: 'at', 'in', 'delay_minutes', 'interval', or 'cron_expression'"
+        );
+    }
+
+    let result = mcp_service::create_reminder_full(
+        target,
+        message,
+        fire_at_override,
+        interval,
+        cron_expression,
+    )?;
+
+    let recurring_suffix = match (interval, cron_expression) {
+        (Some(i), _) => format!(", recurring every {}", i),
+        (_, Some(c)) => format!(", recurring per cron {:?}", c),
+        _ => String::new(),
     };
 
     Ok(json!({
         "content": [{
             "type": "text",
             "text": format!(
-                "Reminder scheduled: target={} at={} (in {:.0} minutes)",
-                result.target, result.fire_at, result.delay_minutes
+                "Reminder scheduled: target={} at={} (in {:.0} minutes){}",
+                result.target, result.fire_at, result.delay_minutes, recurring_suffix
             )
         }],
+        "schedule_kind": result.schedule_kind,
         "isError": false
     }))
 }

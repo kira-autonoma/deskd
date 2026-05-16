@@ -30,6 +30,8 @@ pub fn handle(
         at: fire_at.to_rfc3339(),
         target: target.clone(),
         message,
+        interval: None,
+        cron_expression: None,
     };
 
     let dir = config::reminders_dir();
