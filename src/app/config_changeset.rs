@@ -146,6 +146,7 @@ mod tests {
             auto_compact_threshold_tokens: None,
             empty_completion_threshold: None,
             empty_completion_restart_min_secs: None,
+            state_file: None,
         }
     }
 

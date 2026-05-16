@@ -861,6 +861,39 @@ fn handle_tools_list(
         }
     }));
 
+    // agent_state — atomic read/write of an agent's markdown state document (#456).
+    tools.push(json!({
+        "name": "agent_state",
+        "description": "Read or update an agent's markdown state document atomically. Actions: 'read' (returns full body, empty if missing), 'write' (atomic full replace), 'append' (add a single bullet under a `##`/`###` section), 'set_section' (atomic replace of a single section). All non-read actions take a file lock and stamp `Last updated:` near the top.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["read", "write", "append", "set_section"],
+                    "description": "Operation to perform."
+                },
+                "agent": {
+                    "type": "string",
+                    "description": "Agent name. The state-file path is looked up from deskd.yaml (`state_file:` on the agent), defaulting to `~/.claude/projects/-home-<agent>/memory/current_state.md`."
+                },
+                "content": {
+                    "type": "string",
+                    "description": "For 'write' and 'set_section': full body (write) or section body (set_section)."
+                },
+                "section": {
+                    "type": "string",
+                    "description": "For 'append' and 'set_section': exact `## <section>` or `### <section>` name (case-sensitive). Auto-created at EOF if absent."
+                },
+                "line": {
+                    "type": "string",
+                    "description": "For 'append': the single bullet line to add. `-` prefix optional — added automatically."
+                }
+            },
+            "required": ["action", "agent"]
+        }
+    }));
+
     // telegram_history — read locally accumulated Telegram messages.
     tools.push(json!({
         "name": "telegram_history",
@@ -939,6 +972,7 @@ async fn handle_tools_call(
         "propose_for_need" => mcp_tools::call_propose_for_need(args).await,
         "query_agent" => mcp_tools::call_query_agent(args, agent_name, bus_socket).await,
         "telegram_history" => mcp_tools::call_telegram_history(args).await,
+        "agent_state" => mcp_tools::call_agent_state(args, user_config).await,
         other => anyhow::bail!("Unknown tool: {}", other),
     }
 }

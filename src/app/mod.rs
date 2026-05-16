@@ -12,6 +12,7 @@ pub mod agent;
 pub mod agent_components;
 pub mod agent_process;
 pub mod agent_registry;
+pub mod agent_state;
 pub mod alerts;
 pub mod bus;
 pub mod bus_api;

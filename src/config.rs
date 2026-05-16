@@ -539,6 +539,11 @@ pub struct UserConfig {
     /// definition replaces the inline one. See `infra::agent_file`.
     #[serde(default)]
     pub agents_dir: Option<String>,
+    /// Optional path to the agent's state document (markdown). Read/written by
+    /// the `agent_state` MCP tool. `~` is expanded against `$HOME`. When unset,
+    /// `agent_state` falls back to `~/.claude/projects/-home-<agent>/memory/current_state.md`.
+    #[serde(default)]
+    pub state_file: Option<String>,
 }
 
 /// An A2A skill advertised in the Agent Card (per A2A spec).
@@ -671,6 +676,11 @@ pub struct SubAgentDef {
     /// detection (rate-limit). `None` falls back to the workspace default.
     #[serde(default)]
     pub empty_completion_restart_min_secs: Option<u64>,
+    /// Optional path to this sub-agent's state document (markdown), read/written
+    /// by the `agent_state` MCP tool. `~` is expanded against `$HOME`. When unset,
+    /// `agent_state` falls back to `~/.claude/projects/-home-<name>/memory/current_state.md`.
+    #[serde(default)]
+    pub state_file: Option<String>,
 }
 
 impl SubAgentDef {
@@ -1778,6 +1788,7 @@ agents:
             auto_compact_threshold_tokens: None,
             empty_completion_threshold: None,
             empty_completion_restart_min_secs: None,
+            state_file: None,
         };
         assert!(sub.validate_work_dir("/tmp/parent").is_ok());
     }
@@ -1804,6 +1815,7 @@ agents:
             auto_compact_threshold_tokens: None,
             empty_completion_threshold: None,
             empty_completion_restart_min_secs: None,
+            state_file: None,
         };
         assert!(sub.validate_work_dir("/tmp/parent").is_err());
     }

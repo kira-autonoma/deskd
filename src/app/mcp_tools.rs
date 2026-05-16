@@ -2066,6 +2066,75 @@ pub(crate) async fn call_telegram_history(args: &Value) -> Result<Value> {
     }))
 }
 
+/// `agent_state` — atomic read/write of an agent's markdown state document (#456).
+///
+/// Dispatches on `action`: `read`, `write`, `append`, `set_section`.
+/// File location is configurable per-agent in `deskd.yaml` via `state_file:`;
+/// see [`crate::app::agent_state`] for the resolution rules.
+pub(crate) async fn call_agent_state(
+    args: &Value,
+    user_config: Option<&UserConfig>,
+) -> Result<Value> {
+    let action = args
+        .get("action")
+        .and_then(|v| v.as_str())
+        .context("agent_state: missing 'action' (read | write | append | set_section)")?;
+    let agent = args
+        .get("agent")
+        .and_then(|v| v.as_str())
+        .context("agent_state: missing 'agent'")?;
+
+    let payload = match action {
+        "read" => {
+            let body = crate::app::agent_state::read(agent, user_config).await?;
+            json!({
+                "agent": agent,
+                "content": body,
+            })
+        }
+        "write" => {
+            let content = args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .context("agent_state.write: missing 'content'")?;
+            crate::app::agent_state::write(agent, content, user_config).await?;
+            json!({"status": "written", "agent": agent})
+        }
+        "append" => {
+            let section = args
+                .get("section")
+                .and_then(|v| v.as_str())
+                .context("agent_state.append: missing 'section'")?;
+            let line = args
+                .get("line")
+                .and_then(|v| v.as_str())
+                .context("agent_state.append: missing 'line'")?;
+            crate::app::agent_state::append(agent, section, line, user_config).await?;
+            json!({"status": "appended", "agent": agent, "section": section})
+        }
+        "set_section" => {
+            let section = args
+                .get("section")
+                .and_then(|v| v.as_str())
+                .context("agent_state.set_section: missing 'section'")?;
+            let content = args
+                .get("content")
+                .and_then(|v| v.as_str())
+                .context("agent_state.set_section: missing 'content'")?;
+            crate::app::agent_state::set_section(agent, section, content, user_config).await?;
+            json!({"status": "updated", "agent": agent, "section": section})
+        }
+        other => bail!(
+            "agent_state: unknown action '{}' (expected read | write | append | set_section)",
+            other
+        ),
+    };
+
+    Ok(json!({
+        "content": [{"type": "text", "text": serde_json::to_string(&payload)?}],
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
