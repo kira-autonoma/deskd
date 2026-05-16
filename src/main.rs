@@ -50,6 +50,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Mcp { agent } => {
             mcp::run(&agent).await?;
         }
+        Commands::McpChannel { agent } => {
+            mcp::run_channel(&agent).await?;
+        }
         Commands::Agent { action } => {
             commands::agent::handle(action).await?;
         }

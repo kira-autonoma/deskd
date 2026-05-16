@@ -274,6 +274,76 @@ pub(crate) async fn call_send_message(
     }))
 }
 
+/// Channels-protocol reply tool (#451).
+///
+/// Thin alias of `send_message` with channel-conventional params (`chat_id`,
+/// `text`). Routes to `telegram.out:<chat_id>` so the existing Telegram
+/// outbound adapter delivers the message — no new transport involved.
+///
+/// Schema is locked by the channels reference: any change to required keys
+/// would break system prompts referencing `reply(chat_id, text)`.
+pub(crate) async fn call_reply(args: &Value, agent_name: &str, bus_socket: &str) -> Result<Value> {
+    let chat_id = args
+        .get("chat_id")
+        .and_then(|v| v.as_str())
+        .context("missing chat_id")?;
+    let text = args
+        .get("text")
+        .and_then(|v| v.as_str())
+        .context("missing text")?;
+
+    if chat_id.is_empty() {
+        bail!("chat_id must not be empty");
+    }
+    if text.is_empty() {
+        bail!("text must not be empty");
+    }
+
+    let target = format!("telegram.out:{}", chat_id);
+
+    // Connect, register, publish, disconnect — mirrors the send_message
+    // happy path. No can_message/ACL gating: the channel server is per-agent
+    // and outbound is bounded to the existing telegram adapter route.
+    let stream = UnixStream::connect(bus_socket)
+        .await
+        .with_context(|| format!("failed to connect to bus at {}", bus_socket))?;
+    let (_read_half, mut write_half) = stream.into_split();
+
+    let reg_name = format!("{}-mcp-reply", agent_name);
+    let reg = serde_json::json!({
+        "type": "register",
+        "name": reg_name,
+        "subscriptions": [],
+    });
+    let mut line = serde_json::to_string(&reg)?;
+    line.push('\n');
+    write_half.write_all(line.as_bytes()).await?;
+    write_half.flush().await?;
+
+    // Payload uses `result` so the Telegram adapter (which prefers
+    // result → task → error) renders the body without a "[ts · source]"
+    // prefix mismatch. This stays semantically a reply, not a new task.
+    let msg = serde_json::json!({
+        "type": "message",
+        "id": Uuid::new_v4().to_string(),
+        "source": agent_name,
+        "target": target,
+        "payload": {"result": text, "text": text},
+        "metadata": {"priority": 5u8},
+    });
+    let mut msg_line = serde_json::to_string(&msg)?;
+    msg_line.push('\n');
+    write_half.write_all(msg_line.as_bytes()).await?;
+    write_half.flush().await?;
+
+    info!(agent = %agent_name, target = %target, "reply tool published to bus");
+
+    Ok(json!({
+        "content": [{"type": "text", "text": format!("Replied to chat {}", chat_id)}],
+        "isError": false
+    }))
+}
+
 pub(crate) async fn call_add_persistent_agent(
     args: &Value,
     parent_name: &str,

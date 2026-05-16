@@ -15,8 +15,8 @@ use tokio::sync::Mutex;
 use tracing::{debug, info};
 
 use crate::app::mcp_protocol::{
-    Request, Response, connect_bus_listener, emit_channel_notification, handle_initialize,
-    write_response,
+    Request, Response, ServerMode, connect_bus_listener, emit_channel_notification,
+    handle_initialize, write_response,
 };
 use crate::app::mcp_tools::{self, InternalBus, build_send_message_description};
 use crate::config::UserConfig;
@@ -24,9 +24,25 @@ use crate::ports::bus_wire::BusMessage;
 
 // ─── Main entry point ────────────────────────────────────────────────────────
 
-/// Run the MCP server for the given agent. Reads JSON-RPC from stdin, writes to stdout.
-/// Terminates when stdin closes (i.e. when Claude exits).
+/// Run the standard MCP server (`deskd mcp --agent <name>`).
+///
+/// Reads JSON-RPC from stdin, writes to stdout. Terminates when stdin closes
+/// (i.e. when Claude exits).
 pub async fn run(agent_name: &str) -> Result<()> {
+    run_with_mode(agent_name, ServerMode::Plain).await
+}
+
+/// Run the Claude Code Channels MCP server (`deskd mcp-channel --agent <name>`).
+///
+/// Same wire protocol as [`run`], but identifies as `deskd-telegram`,
+/// advertises the `experimental.claude/channel` capability, registers the
+/// `reply` tool, and forwards Telegram-inbox bus messages as
+/// `notifications/claude/channel` frames over stdout. See #451.
+pub async fn run_channel(agent_name: &str) -> Result<()> {
+    run_with_mode(agent_name, ServerMode::Channel).await
+}
+
+async fn run_with_mode(agent_name: &str, mode: ServerMode) -> Result<()> {
     let bus_socket = std::env::var("DESKD_BUS_SOCKET")
         .with_context(|| "DESKD_BUS_SOCKET not set — was this started by deskd?")?;
 
@@ -42,7 +58,7 @@ pub async fn run(agent_name: &str) -> Result<()> {
     let task_store = crate::app::task::TaskStore::default_for_home();
     let sm_store = crate::app::statemachine::StateMachineStore::default_for_home();
 
-    info!(agent = %agent_name, bus = %bus_socket, "MCP server started");
+    info!(agent = %agent_name, bus = %bus_socket, mode = ?mode, "MCP server started");
 
     let stdin = tokio::io::stdin();
     let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
@@ -57,7 +73,7 @@ pub async fn run(agent_name: &str) -> Result<()> {
     // The MCP server registers as `<agent>-mcp-channel` and subscribes to
     // messages targeted at this agent so they can be forwarded as channel
     // notifications into the Claude session.
-    let mut bus_rx = connect_bus_listener(agent_name, &bus_socket).await;
+    let mut bus_rx = connect_bus_listener(agent_name, &bus_socket, mode).await;
 
     loop {
         // Select between stdin (JSON-RPC requests from Claude) and bus
@@ -125,6 +141,7 @@ pub async fn run(agent_name: &str) -> Result<()> {
                     &internal_bus,
                     &task_store,
                     &sm_store,
+                    mode,
                 )
                 .await;
                 let mut out = stdout.lock().await;
@@ -198,11 +215,12 @@ async fn handle_request(
     internal_bus: &Arc<Mutex<Option<InternalBus>>>,
     task_store: &dyn crate::ports::store::TaskRepository,
     sm_store: &dyn crate::ports::store::StateMachineRepository,
+    mode: ServerMode,
 ) -> Response {
     let id = req.id.clone();
     match req.method.as_str() {
-        "initialize" => handle_initialize(id),
-        "tools/list" => handle_tools_list(id, agent_name, user_config),
+        "initialize" => handle_initialize(id, mode),
+        "tools/list" => handle_tools_list(id, agent_name, user_config, mode),
         "tools/call" => {
             let params = req.params.as_ref().unwrap_or(&Value::Null);
             match handle_tools_call(
@@ -233,6 +251,7 @@ fn handle_tools_list(
     id: Option<Value>,
     agent_name: &str,
     user_config: Option<&UserConfig>,
+    mode: ServerMode,
 ) -> Response {
     let send_message_desc = user_config
         .map(|c| build_send_message_description(c, agent_name))
@@ -330,6 +349,29 @@ fn handle_tools_list(
             }
         }),
     ];
+
+    // Channel `reply` tool (#451) — only advertised in channel mode so plain
+    // MCP sessions don't see an extra tool that aliases send_message.
+    if mode == ServerMode::Channel {
+        tools.push(json!({
+            "name": "reply",
+            "description": "Send a reply back over the Telegram channel. Pass `chat_id` from the inbound <channel> tag's chat_id attribute.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "chat_id": {
+                        "type": "string",
+                        "description": "Telegram chat id from the inbound <channel> tag (e.g. \"-100123456789\")."
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Message body to send to Telegram."
+                    }
+                },
+                "required": ["chat_id", "text"]
+            }
+        }));
+    }
 
     // Scope introspection
     tools.push(json!({
@@ -852,6 +894,7 @@ async fn handle_tools_call(
             mcp_tools::call_send_message(args, agent_name, bus_socket, user_config, internal_bus)
                 .await
         }
+        "reply" => mcp_tools::call_reply(args, agent_name, bus_socket).await,
         "add_persistent_agent" => {
             mcp_tools::call_add_persistent_agent(args, agent_name, bus_socket, internal_bus).await
         }

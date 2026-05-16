@@ -39,6 +39,21 @@ pub enum Commands {
         #[arg(long)]
         agent: String,
     },
+    /// Run as a Claude Code Channels MCP server (#451).
+    ///
+    /// Same wire protocol as `deskd mcp` but identifies as `deskd-telegram`,
+    /// advertises the `experimental.claude/channel` capability, registers the
+    /// `reply` tool, and forwards Telegram-inbox bus messages as
+    /// `notifications/claude/channel` frames over stdout.
+    ///
+    /// Intended for use as the MCP server in `.mcp.json` with
+    /// `claude --dangerously-load-development-channels server:deskd`.
+    #[command(name = "mcp-channel")]
+    McpChannel {
+        /// Agent name (must match an agent registered in deskd state).
+        #[arg(long)]
+        agent: String,
+    },
     /// Manage agents.
     Agent {
         #[command(subcommand)]
