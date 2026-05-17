@@ -852,7 +852,7 @@ async fn fire_shell(
     Ok(())
 }
 
-/// Scan `~/.deskd/reminders/` every 10 seconds and fire any due reminders.
+/// Scan `{work_dir}/.deskd/reminders/` every 10 seconds and fire any due reminders.
 ///
 /// Each reminder is a JSON file (`RemindDef`) written by `deskd remind` or the
 /// `create_reminder` MCP tool. When the `at` timestamp is <= now, the reminder
@@ -864,10 +864,17 @@ async fn fire_shell(
 /// Restart-storm policy: a recurring reminder whose `at` is in the past (e.g.
 /// deskd was offline for hours) fires ONCE and is then re-armed to the next
 /// future occurrence — never replays all missed ticks. See #455.
-pub async fn run_reminders(bus_socket: String, agent_name: String) {
+///
+/// `work_dir` is the agent's working directory (from `AgentDef.work_dir`); it
+/// MUST be the same directory the MCP `create_reminder` tool writes to. This
+/// agreement is the fix for #467 — before it, the scanner ran in `deskd serve`
+/// as root and looked at `/root/.deskd/reminders/`, while the MCP server ran
+/// under the agent's `unix_user` and wrote to `/home/<user>/.deskd/reminders/`.
+pub async fn run_reminders(bus_socket: String, agent_name: String, work_dir: String) {
+    let work_dir_path = std::path::PathBuf::from(&work_dir);
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        fire_due_reminders(&bus_socket, &agent_name, Utc::now()).await;
+        fire_due_reminders(&bus_socket, &agent_name, &work_dir_path, Utc::now()).await;
     }
 }
 
@@ -876,9 +883,10 @@ pub async fn run_reminders(bus_socket: String, agent_name: String) {
 pub async fn fire_due_reminders(
     bus_socket: &str,
     agent_name: &str,
+    work_dir: &std::path::Path,
     now: chrono::DateTime<chrono::Utc>,
 ) {
-    let dir = crate::config::reminders_dir();
+    let dir = crate::config::reminders_dir_for(work_dir);
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
         Err(e) => {

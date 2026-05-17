@@ -1,6 +1,7 @@
 //! `deskd remind` subcommand handler.
 
 use anyhow::{Context, Result};
+use std::path::PathBuf;
 
 use crate::config;
 
@@ -34,7 +35,17 @@ pub fn handle(
         cron_expression: None,
     };
 
-    let dir = config::reminders_dir();
+    // Resolve the agent's work_dir so we write to the same location the
+    // firing scanner reads from (#467). Prefer DESKD_AGENT_CONFIG's parent
+    // (the canonical {work_dir}/deskd.yaml convention); fall back to CWD
+    // when the CLI is run outside an agent context (e.g. by hand).
+    let work_dir: PathBuf = std::env::var("DESKD_AGENT_CONFIG")
+        .ok()
+        .as_deref()
+        .and_then(|p| std::path::Path::new(p).parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    let dir = config::reminders_dir_for(&work_dir);
     let filename = format!("{}.json", uuid::Uuid::new_v4());
     let path = dir.join(&filename);
 

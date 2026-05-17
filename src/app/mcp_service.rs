@@ -140,20 +140,26 @@ pub struct ReminderCreated {
     pub schedule_kind: &'static str,
 }
 
-/// Create a one-shot reminder persisted to disk.
-pub fn create_reminder(target: &str, message: &str, delay_minutes: f64) -> Result<ReminderCreated> {
+/// Create a one-shot reminder persisted to disk under `{work_dir}/.deskd/reminders/`.
+pub fn create_reminder(
+    work_dir: &Path,
+    target: &str,
+    message: &str,
+    delay_minutes: f64,
+) -> Result<ReminderCreated> {
     let fire_at =
         chrono::Utc::now() + chrono::Duration::seconds((delay_minutes * 60.0).round() as i64);
-    create_reminder_at(target, message, fire_at)
+    create_reminder_at(work_dir, target, message, fire_at)
 }
 
 /// Create a one-shot reminder at a specific absolute time.
 pub fn create_reminder_at(
+    work_dir: &Path,
     target: &str,
     message: &str,
     fire_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<ReminderCreated> {
-    create_reminder_full(target, message, Some(fire_at), None, None)
+    create_reminder_full(work_dir, target, message, Some(fire_at), None, None)
 }
 
 /// Create a reminder with optional recurring schedule.
@@ -166,7 +172,11 @@ pub fn create_reminder_at(
 ///
 /// `interval` and `cron_expression` are mutually exclusive (validated by
 /// `parse_schedule_kind`).
+///
+/// The file is written under `{work_dir}/.deskd/reminders/` — same convention
+/// as `bus.sock`, and the location the firing scanner reads from (#467).
 pub fn create_reminder_full(
+    work_dir: &Path,
     target: &str,
     message: &str,
     fire_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -198,7 +208,7 @@ pub fn create_reminder_full(
         cron_expression: cron_expression.map(|s| s.to_string()),
     };
 
-    let dir = crate::config::reminders_dir();
+    let dir = crate::config::reminders_dir_for(work_dir);
     let filename = format!("{}.json", uuid::Uuid::new_v4());
     let path = dir.join(&filename);
 
@@ -206,7 +216,7 @@ pub fn create_reminder_full(
     std::fs::write(&path, json)
         .with_context(|| format!("failed to write reminder file: {}", path.display()))?;
 
-    info!(target = %target, at = %resolved_fire_at, kind = kind.label(), "create_reminder");
+    info!(target = %target, at = %resolved_fire_at, kind = kind.label(), work_dir = %work_dir.display(), "create_reminder");
 
     Ok(ReminderCreated {
         target: target.to_string(),
@@ -225,8 +235,8 @@ struct LoadedReminder {
 
 /// Read all reminder files from disk, parsing each into `LoadedReminder`.
 /// Files that fail to parse are skipped silently (the scheduler does the same).
-fn load_all_reminders() -> Result<Vec<LoadedReminder>> {
-    let dir = crate::config::reminders_dir();
+fn load_all_reminders(work_dir: &Path) -> Result<Vec<LoadedReminder>> {
+    let dir = crate::config::reminders_dir_for(work_dir);
     let entries = match std::fs::read_dir(&dir) {
         Ok(it) => it,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -283,12 +293,13 @@ fn message_preview(message: &str, max_chars: usize) -> String {
 /// - `after` — only reminders firing strictly after this UTC time
 /// - `limit` — cap returned entries (default 50 at the tool layer)
 pub fn list_reminders(
+    work_dir: &Path,
     target_substr: Option<&str>,
     before: Option<chrono::DateTime<chrono::Utc>>,
     after: Option<chrono::DateTime<chrono::Utc>>,
     limit: usize,
 ) -> Result<Vec<Value>> {
-    let mut all = load_all_reminders()?;
+    let mut all = load_all_reminders(work_dir)?;
     all.sort_by_key(|r| r.at);
 
     let filtered = all.into_iter().filter(|r| {
@@ -348,15 +359,15 @@ fn validate_reminder_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Path on disk for a given reminder id.
-fn reminder_path(id: &str) -> Result<PathBuf> {
+/// Path on disk for a given reminder id under `work_dir`.
+fn reminder_path(work_dir: &Path, id: &str) -> Result<PathBuf> {
     validate_reminder_id(id)?;
-    Ok(crate::config::reminders_dir().join(format!("{}.json", id)))
+    Ok(crate::config::reminders_dir_for(work_dir).join(format!("{}.json", id)))
 }
 
 /// Read a reminder file and return its full record as JSON.
-pub fn get_reminder(id: &str) -> Result<Value> {
-    let path = reminder_path(id)?;
+pub fn get_reminder(work_dir: &Path, id: &str) -> Result<Value> {
+    let path = reminder_path(work_dir, id)?;
     let content =
         std::fs::read_to_string(&path).with_context(|| format!("reminder not found: {}", id))?;
     let def: crate::config::RemindDef =
@@ -379,8 +390,8 @@ pub fn get_reminder(id: &str) -> Result<Value> {
 }
 
 /// Delete a reminder file. Idempotent: missing file returns `cancelled: false`.
-pub fn cancel_reminder(id: &str) -> Result<Value> {
-    let path = reminder_path(id)?;
+pub fn cancel_reminder(work_dir: &Path, id: &str) -> Result<Value> {
+    let path = reminder_path(work_dir, id)?;
     match std::fs::remove_file(&path) {
         Ok(()) => {
             info!(id = %id, "cancel_reminder");
@@ -400,12 +411,13 @@ pub fn cancel_reminder(id: &str) -> Result<Value> {
 /// Atomicity: write to `<id>.json.tmp` then `rename` to `<id>.json` so the
 /// scheduler tick (which reads files every 10s) never observes a partial write.
 pub fn update_reminder(
+    work_dir: &Path,
     id: &str,
     new_at: Option<chrono::DateTime<chrono::Utc>>,
     new_target: Option<&str>,
     new_message: Option<&str>,
 ) -> Result<Value> {
-    let path = reminder_path(id)?;
+    let path = reminder_path(work_dir, id)?;
     let content =
         std::fs::read_to_string(&path).with_context(|| format!("reminder not found: {}", id))?;
     let mut def: crate::config::RemindDef =

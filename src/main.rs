@@ -136,7 +136,10 @@ mod tests {
 
     #[test]
     fn test_handle_remind_writes_file() {
-        // Serialize env mutation; setenv is not thread-safe on POSIX.
+        // remind::handle now resolves work_dir from DESKD_AGENT_CONFIG (parent
+        // dir) to match the rest of the system (#467). Use a tempdir as that
+        // parent and write a placeholder deskd.yaml so the resolution works.
+        // env mutation is serialised because setenv is not thread-safe.
         let _env_guard = deskd::test_support::env_lock().blocking_lock();
         let tmp = std::path::PathBuf::from(format!(
             "/tmp/deskd-test-remind-{}",
@@ -146,9 +149,12 @@ mod tests {
                 .subsec_nanos()
         ));
         std::fs::create_dir_all(&tmp).unwrap();
+        let cfg_path = tmp.join("deskd.yaml");
+        std::fs::write(&cfg_path, "model: claude-sonnet-4-6\n").unwrap();
 
+        let prev_cfg = std::env::var("DESKD_AGENT_CONFIG").ok();
         unsafe {
-            std::env::set_var("HOME", &tmp);
+            std::env::set_var("DESKD_AGENT_CONFIG", &cfg_path);
         }
 
         remind::handle(
@@ -174,6 +180,13 @@ mod tests {
         assert_eq!(parsed.target, "agent:kira");
         assert_eq!(parsed.message, "test reminder");
 
+        // Restore env so other tests in this binary aren't affected.
+        unsafe {
+            match prev_cfg {
+                Some(v) => std::env::set_var("DESKD_AGENT_CONFIG", v),
+                None => std::env::remove_var("DESKD_AGENT_CONFIG"),
+            }
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

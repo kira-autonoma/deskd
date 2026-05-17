@@ -583,7 +583,10 @@ pub(crate) async fn call_add_persistent_agent(
 
 // ─── Reminder ────────────────────────────────────────────────────────────────
 
-pub(crate) async fn call_create_reminder(args: &Value) -> Result<Value> {
+pub(crate) async fn call_create_reminder(
+    args: &Value,
+    work_dir: &std::path::Path,
+) -> Result<Value> {
     let target = args
         .get("target")
         .and_then(|t| t.as_str())
@@ -628,6 +631,7 @@ pub(crate) async fn call_create_reminder(args: &Value) -> Result<Value> {
     }
 
     let result = mcp_service::create_reminder_full(
+        work_dir,
         target,
         message,
         fire_at_override,
@@ -654,7 +658,7 @@ pub(crate) async fn call_create_reminder(args: &Value) -> Result<Value> {
     }))
 }
 
-pub(crate) async fn call_list_reminders(args: &Value) -> Result<Value> {
+pub(crate) async fn call_list_reminders(args: &Value, work_dir: &std::path::Path) -> Result<Value> {
     let target_substr = args.get("target").and_then(|t| t.as_str());
     let before = match args.get("before").and_then(|b| b.as_str()) {
         Some(s) => Some(parse_at_time(s)?),
@@ -670,7 +674,7 @@ pub(crate) async fn call_list_reminders(args: &Value) -> Result<Value> {
         .map(|n| n as usize)
         .unwrap_or(50);
 
-    let items = mcp_service::list_reminders(target_substr, before, after, limit)?;
+    let items = mcp_service::list_reminders(work_dir, target_substr, before, after, limit)?;
     let count = items.len();
     let summary = if count == 0 {
         "No reminders match.".to_string()
@@ -698,12 +702,12 @@ pub(crate) async fn call_list_reminders(args: &Value) -> Result<Value> {
     }))
 }
 
-pub(crate) async fn call_get_reminder(args: &Value) -> Result<Value> {
+pub(crate) async fn call_get_reminder(args: &Value, work_dir: &std::path::Path) -> Result<Value> {
     let id = args
         .get("id")
         .and_then(|i| i.as_str())
         .context("missing id")?;
-    let reminder = mcp_service::get_reminder(id)?;
+    let reminder = mcp_service::get_reminder(work_dir, id)?;
     let text = format!(
         "id={} at={} target={}\nmessage:\n{}",
         reminder.get("id").and_then(|v| v.as_str()).unwrap_or("?"),
@@ -724,12 +728,15 @@ pub(crate) async fn call_get_reminder(args: &Value) -> Result<Value> {
     }))
 }
 
-pub(crate) async fn call_cancel_reminder(args: &Value) -> Result<Value> {
+pub(crate) async fn call_cancel_reminder(
+    args: &Value,
+    work_dir: &std::path::Path,
+) -> Result<Value> {
     let id = args
         .get("id")
         .and_then(|i| i.as_str())
         .context("missing id")?;
-    let result = mcp_service::cancel_reminder(id)?;
+    let result = mcp_service::cancel_reminder(work_dir, id)?;
     let cancelled = result
         .get("cancelled")
         .and_then(|v| v.as_bool())
@@ -750,7 +757,10 @@ pub(crate) async fn call_cancel_reminder(args: &Value) -> Result<Value> {
     }))
 }
 
-pub(crate) async fn call_update_reminder(args: &Value) -> Result<Value> {
+pub(crate) async fn call_update_reminder(
+    args: &Value,
+    work_dir: &std::path::Path,
+) -> Result<Value> {
     let id = args
         .get("id")
         .and_then(|i| i.as_str())
@@ -773,7 +783,7 @@ pub(crate) async fn call_update_reminder(args: &Value) -> Result<Value> {
         bail!("update_reminder requires at least one of: 'at', 'in', 'target', 'message'");
     }
 
-    let updated = mcp_service::update_reminder(id, new_at, new_target, new_message)?;
+    let updated = mcp_service::update_reminder(work_dir, id, new_at, new_target, new_message)?;
     let text = format!(
         "Reminder {} updated: at={} target={}",
         id,

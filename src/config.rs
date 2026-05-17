@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 // Re-export path helpers (infra layer — filesystem layout concerns).
 pub use crate::infra::paths::{
-    agent_bus_socket, ensure_dir_owned, log_dir, reminders_dir, state_dir,
+    agent_bus_socket, ensure_dir_owned, log_dir, reminders_dir, reminders_dir_for, state_dir,
 };
 
 /// A reminder that fires at a specific time and posts a message to the bus.

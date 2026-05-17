@@ -96,12 +96,14 @@ pub async fn spawn_components(
         components.config_watcher = Some(handle);
     }
 
-    // Reminder runner
+    // Reminder runner — work_dir threaded through so the scanner reads from
+    // the SAME location the MCP `create_reminder` tool writes to (#467).
     {
         let bus = bus_socket.to_string();
         let name = agent_name.to_string();
+        let work_dir = def.work_dir.clone();
         let handle = tokio::spawn(async move {
-            schedule::run_reminders(bus, name).await;
+            schedule::run_reminders(bus, name, work_dir).await;
         });
         components.reminder_runner = Some(handle);
     }
@@ -248,8 +250,9 @@ fn spawn_schedules(
     {
         let bus = bus_socket.to_string();
         let name = agent_name.to_string();
+        let work_dir = def.work_dir.clone();
         let handle = tokio::spawn(async move {
-            schedule::run_reminders(bus, name).await;
+            schedule::run_reminders(bus, name, work_dir).await;
         });
         components.reminder_runner = Some(handle);
     }

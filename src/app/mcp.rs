@@ -51,6 +51,19 @@ async fn run_with_mode(agent_name: &str, mode: ServerMode) -> Result<()> {
         .as_deref()
         .and_then(|p| UserConfig::load(p).ok());
 
+    // Resolve the agent's work_dir from DESKD_AGENT_CONFIG (deskd.yaml lives
+    // at `{work_dir}/deskd.yaml`). This is the canonical reminder location
+    // (#467) — both `create_reminder` from MCP and the firing scanner in
+    // `deskd serve` use it. If DESKD_AGENT_CONFIG is missing (only happens
+    // when an agent has no deskd.yaml), fall back to the process CWD so
+    // tests and ad-hoc invocations still work.
+    let work_dir: std::path::PathBuf = config_path
+        .as_deref()
+        .and_then(|p| std::path::Path::new(p).parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| {
+            std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+        });
+
     // Lazy-initialized internal bus for sub-agent orchestration.
     let internal_bus: Arc<Mutex<Option<InternalBus>>> = Arc::new(Mutex::new(None));
 
@@ -137,6 +150,7 @@ async fn run_with_mode(agent_name: &str, mode: ServerMode) -> Result<()> {
                     &req,
                     agent_name,
                     &bus_socket,
+                    &work_dir,
                     user_config.as_ref(),
                     &internal_bus,
                     &task_store,
@@ -211,6 +225,7 @@ async fn handle_request(
     req: &Request,
     agent_name: &str,
     bus_socket: &str,
+    work_dir: &std::path::Path,
     user_config: Option<&UserConfig>,
     internal_bus: &Arc<Mutex<Option<InternalBus>>>,
     task_store: &dyn crate::ports::store::TaskRepository,
@@ -227,6 +242,7 @@ async fn handle_request(
                 params,
                 agent_name,
                 bus_socket,
+                work_dir,
                 user_config,
                 internal_bus,
                 task_store,
@@ -914,10 +930,12 @@ fn handle_tools_list(
 
 // ─── Tool dispatch ───────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_tools_call(
     params: &Value,
     agent_name: &str,
     bus_socket: &str,
+    work_dir: &std::path::Path,
     user_config: Option<&UserConfig>,
     internal_bus: &Arc<Mutex<Option<InternalBus>>>,
     task_store: &dyn crate::ports::store::TaskRepository,
@@ -939,11 +957,11 @@ async fn handle_tools_call(
         "add_persistent_agent" => {
             mcp_tools::call_add_persistent_agent(args, agent_name, bus_socket, internal_bus).await
         }
-        "create_reminder" => mcp_tools::call_create_reminder(args).await,
-        "list_reminders" => mcp_tools::call_list_reminders(args).await,
-        "get_reminder" => mcp_tools::call_get_reminder(args).await,
-        "cancel_reminder" => mcp_tools::call_cancel_reminder(args).await,
-        "update_reminder" => mcp_tools::call_update_reminder(args).await,
+        "create_reminder" => mcp_tools::call_create_reminder(args, work_dir).await,
+        "list_reminders" => mcp_tools::call_list_reminders(args, work_dir).await,
+        "get_reminder" => mcp_tools::call_get_reminder(args, work_dir).await,
+        "cancel_reminder" => mcp_tools::call_cancel_reminder(args, work_dir).await,
+        "update_reminder" => mcp_tools::call_update_reminder(args, work_dir).await,
         "list_inboxes" => mcp_tools::call_list_inboxes(agent_name, user_config).await,
         "read_inbox" => mcp_tools::call_read_inbox(args, agent_name, user_config).await,
         "search_inbox" => mcp_tools::call_search_inbox(args, agent_name, user_config).await,

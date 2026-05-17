@@ -1,12 +1,12 @@
-//! Integration tests for recurring reminders (#455).
+//! Integration tests for recurring reminders (#455) and the work_dir-based
+//! reminder path resolution (#467).
 //!
 //! These exercise the scheduler scan loop end-to-end via the public
-//! `fire_due_reminders` entrypoint, using a tempdir-as-HOME and an in-process
-//! bus listener so we can assert real bus delivery.
+//! `fire_due_reminders` entrypoint, using a tempdir as the agent's work_dir
+//! and an in-process bus listener so we can assert real bus delivery.
 //!
-//! The shared `env_lock` mutex from `deskd::test_support` serializes any test
-//! that mutates `HOME` — POSIX `setenv` is not thread-safe under cargo's
-//! parallel runner.
+//! Each test owns its own tempdir; no process env is mutated and tests can
+//! run in parallel without serialization.
 
 use deskd::app::mcp_service::{ScheduleKind, create_reminder_full, parse_schedule_kind};
 use deskd::config::RemindDef;
@@ -51,14 +51,9 @@ async fn spawn_bus_listener(socket: &str) -> tokio::sync::mpsc::UnboundedReceive
     rx
 }
 
-/// Set `HOME` for the duration of the test and create the reminders dir.
-/// Returns the tempdir handle so it's dropped (cleaned) at test end.
-fn isolate_home() -> tempfile::TempDir {
+/// Allocate a fresh agent work_dir with `.deskd/reminders/` pre-created.
+fn isolated_work_dir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().expect("create tempdir");
-    // SAFETY: env mutation serialized via test_support::env_lock by callers.
-    unsafe {
-        std::env::set_var("HOME", dir.path());
-    }
     std::fs::create_dir_all(dir.path().join(".deskd/reminders")).expect("create reminders dir");
     dir
 }
@@ -160,14 +155,15 @@ fn next_after_cron_is_future() {
 /// schedule_kind reports "one_shot".
 #[tokio::test]
 async fn create_reminder_one_shot_unchanged() {
-    let _guard = deskd::test_support::env_lock().lock().await;
-    let _home = isolate_home();
+    let home = isolated_work_dir();
+    let work_dir = home.path();
 
     let fire_at = chrono::Utc::now() + chrono::Duration::seconds(120);
-    let res = create_reminder_full("agent:test", "hi", Some(fire_at), None, None).unwrap();
+    let res =
+        create_reminder_full(work_dir, "agent:test", "hi", Some(fire_at), None, None).unwrap();
     assert_eq!(res.schedule_kind, "one_shot");
 
-    let dir = deskd::config::reminders_dir();
+    let dir = deskd::config::reminders_dir_for(work_dir);
     let files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .flatten()
@@ -185,13 +181,14 @@ async fn create_reminder_one_shot_unchanged() {
 /// restart can re-arm without losing the schedule.
 #[tokio::test]
 async fn create_reminder_interval_persists_source_string() {
-    let _guard = deskd::test_support::env_lock().lock().await;
-    let _home = isolate_home();
+    let home = isolated_work_dir();
+    let work_dir = home.path();
 
-    let res = create_reminder_full("agent:test", "watchdog", None, Some("2h"), None).unwrap();
+    let res =
+        create_reminder_full(work_dir, "agent:test", "watchdog", None, Some("2h"), None).unwrap();
     assert_eq!(res.schedule_kind, "interval");
 
-    let dir = deskd::config::reminders_dir();
+    let dir = deskd::config::reminders_dir_for(work_dir);
     let files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .flatten()
@@ -208,14 +205,21 @@ async fn create_reminder_interval_persists_source_string() {
 /// `create_reminder` with `cron_expression` persists the source string.
 #[tokio::test]
 async fn create_reminder_cron_persists_source_string() {
-    let _guard = deskd::test_support::env_lock().lock().await;
-    let _home = isolate_home();
+    let home = isolated_work_dir();
+    let work_dir = home.path();
 
-    let res =
-        create_reminder_full("agent:test", "watchdog", None, None, Some("0 */2 * * *")).unwrap();
+    let res = create_reminder_full(
+        work_dir,
+        "agent:test",
+        "watchdog",
+        None,
+        None,
+        Some("0 */2 * * *"),
+    )
+    .unwrap();
     assert_eq!(res.schedule_kind, "cron");
 
-    let dir = deskd::config::reminders_dir();
+    let dir = deskd::config::reminders_dir_for(work_dir);
     let files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .flatten()
@@ -232,21 +236,29 @@ async fn create_reminder_cron_persists_source_string() {
 /// Mutual-exclusion error is surfaced from `create_reminder_full`.
 #[tokio::test]
 async fn create_reminder_rejects_both_interval_and_cron() {
-    let _guard = deskd::test_support::env_lock().lock().await;
-    let _home = isolate_home();
+    let home = isolated_work_dir();
+    let work_dir = home.path();
 
-    let err = create_reminder_full("agent:test", "msg", None, Some("30m"), Some("0 * * * *"))
-        .unwrap_err();
+    let err = create_reminder_full(
+        work_dir,
+        "agent:test",
+        "msg",
+        None,
+        Some("30m"),
+        Some("0 * * * *"),
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("mutually exclusive"));
 }
 
 /// list_reminders reflects schedule_kind and next_fire_at for all three kinds.
 #[tokio::test]
 async fn list_reminders_reports_schedule_kind() {
-    let _guard = deskd::test_support::env_lock().lock().await;
-    let _home = isolate_home();
+    let home = isolated_work_dir();
+    let work_dir = home.path();
 
     create_reminder_full(
+        work_dir,
         "agent:a",
         "one-shot",
         Some(chrono::Utc::now() + chrono::Duration::minutes(10)),
@@ -254,10 +266,10 @@ async fn list_reminders_reports_schedule_kind() {
         None,
     )
     .unwrap();
-    create_reminder_full("agent:b", "interval", None, Some("1h"), None).unwrap();
-    create_reminder_full("agent:c", "cron", None, None, Some("*/5 * * * *")).unwrap();
+    create_reminder_full(work_dir, "agent:b", "interval", None, Some("1h"), None).unwrap();
+    create_reminder_full(work_dir, "agent:c", "cron", None, None, Some("*/5 * * * *")).unwrap();
 
-    let items = deskd::app::mcp_service::list_reminders(None, None, None, 50).unwrap();
+    let items = deskd::app::mcp_service::list_reminders(work_dir, None, None, None, 50).unwrap();
     assert_eq!(items.len(), 3);
 
     let kinds: std::collections::HashSet<_> = items
@@ -284,8 +296,8 @@ async fn list_reminders_reports_schedule_kind() {
 /// deleted by the scan loop.
 #[tokio::test]
 async fn interval_reminder_fires_twice_and_persists() {
-    let _guard = deskd::test_support::env_lock().lock().await;
-    let _home = isolate_home();
+    let home = isolated_work_dir();
+    let work_dir = home.path();
 
     let socket = temp_socket_path();
     let mut rx = spawn_bus_listener(&socket).await;
@@ -294,6 +306,7 @@ async fn interval_reminder_fires_twice_and_persists() {
 
     // Write a reminder whose `at` is already in the past, with a 1-minute interval.
     create_reminder_full(
+        work_dir,
         "agent:watch",
         "ping",
         Some(chrono::Utc::now() - chrono::Duration::seconds(5)),
@@ -304,7 +317,7 @@ async fn interval_reminder_fires_twice_and_persists() {
 
     // First scan: should fire and re-arm.
     let now1 = chrono::Utc::now();
-    deskd::app::schedule::fire_due_reminders(&socket, "test-agent", now1).await;
+    deskd::app::schedule::fire_due_reminders(&socket, "test-agent", work_dir, now1).await;
 
     let got1 = tokio::time::timeout(Duration::from_secs(2), rx.recv())
         .await
@@ -313,7 +326,7 @@ async fn interval_reminder_fires_twice_and_persists() {
     assert_eq!(got1, "ping");
 
     // The reminder file must still exist (recurring keeps the row).
-    let dir = deskd::config::reminders_dir();
+    let dir = deskd::config::reminders_dir_for(work_dir);
     let files1: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .flatten()
@@ -330,7 +343,7 @@ async fn interval_reminder_fires_twice_and_persists() {
 
     // Second scan: should fire again.
     let now2 = chrono::Utc::now();
-    deskd::app::schedule::fire_due_reminders(&socket, "test-agent", now2).await;
+    deskd::app::schedule::fire_due_reminders(&socket, "test-agent", work_dir, now2).await;
     let got2 = tokio::time::timeout(Duration::from_secs(2), rx.recv())
         .await
         .expect("second fire timed out")
@@ -351,15 +364,15 @@ async fn interval_reminder_fires_twice_and_persists() {
 /// on the next scan without any in-memory state.
 #[tokio::test]
 async fn restart_resilience_picks_up_persisted_recurring() {
-    let _guard = deskd::test_support::env_lock().lock().await;
-    let _home = isolate_home();
+    let home = isolated_work_dir();
+    let work_dir = home.path();
 
     let socket = temp_socket_path();
     let mut rx = spawn_bus_listener(&socket).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Simulate a state file already on disk from a previous deskd process.
-    let dir = deskd::config::reminders_dir();
+    let dir = deskd::config::reminders_dir_for(work_dir);
     let path = dir.join("test-fixture.json");
     let def = RemindDef {
         at: (chrono::Utc::now() - chrono::Duration::minutes(2)).to_rfc3339(),
@@ -371,7 +384,7 @@ async fn restart_resilience_picks_up_persisted_recurring() {
     std::fs::write(&path, serde_json::to_string_pretty(&def).unwrap()).unwrap();
 
     let now = chrono::Utc::now();
-    deskd::app::schedule::fire_due_reminders(&socket, "test-agent", now).await;
+    deskd::app::schedule::fire_due_reminders(&socket, "test-agent", work_dir, now).await;
     let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())
         .await
         .expect("fire timed out")
@@ -393,8 +406,8 @@ async fn restart_resilience_picks_up_persisted_recurring() {
 /// cancel_reminder removes the file so a recurring reminder will not fire again.
 #[tokio::test]
 async fn cancel_recurring_reminder_stops_future_fires() {
-    let _guard = deskd::test_support::env_lock().lock().await;
-    let _home = isolate_home();
+    let home = isolated_work_dir();
+    let work_dir = home.path();
 
     let socket = temp_socket_path();
     let mut rx = spawn_bus_listener(&socket).await;
@@ -402,6 +415,7 @@ async fn cancel_recurring_reminder_stops_future_fires() {
 
     // Create + cancel before the scheduler runs.
     create_reminder_full(
+        work_dir,
         "agent:watch",
         "should-not-fire",
         Some(chrono::Utc::now() - chrono::Duration::seconds(5)),
@@ -410,7 +424,7 @@ async fn cancel_recurring_reminder_stops_future_fires() {
     )
     .unwrap();
 
-    let dir = deskd::config::reminders_dir();
+    let dir = deskd::config::reminders_dir_for(work_dir);
     let files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .flatten()
@@ -423,19 +437,130 @@ async fn cancel_recurring_reminder_stops_future_fires() {
         .to_string_lossy()
         .to_string();
 
-    let res = deskd::app::mcp_service::cancel_reminder(&id).unwrap();
+    let res = deskd::app::mcp_service::cancel_reminder(work_dir, &id).unwrap();
     assert_eq!(
         res.get("cancelled").unwrap(),
         &serde_json::Value::Bool(true)
     );
 
     // Now a scheduler scan must NOT fire anything.
-    deskd::app::schedule::fire_due_reminders(&socket, "test-agent", chrono::Utc::now()).await;
+    deskd::app::schedule::fire_due_reminders(&socket, "test-agent", work_dir, chrono::Utc::now())
+        .await;
 
     let timeout = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await;
     assert!(
         timeout.is_err(),
         "cancelled reminder must not produce bus message"
     );
+    let _ = std::fs::remove_file(&socket);
+}
+
+/// #467 regression: two agents with different work_dirs must have ISOLATED
+/// reminder directories. A reminder created for agent A must never be
+/// picked up by the scanner running with agent B's work_dir.
+#[tokio::test]
+async fn reminders_are_isolated_per_work_dir() {
+    let home_a = isolated_work_dir();
+    let home_b = isolated_work_dir();
+
+    // Write a due reminder under agent A's work_dir.
+    create_reminder_full(
+        home_a.path(),
+        "agent:a",
+        "a-only",
+        Some(chrono::Utc::now() - chrono::Duration::seconds(5)),
+        Some("1m"),
+        None,
+    )
+    .unwrap();
+
+    // Agent B's bus listener — should never receive A's reminder.
+    let socket_b = temp_socket_path();
+    let mut rx_b = spawn_bus_listener(&socket_b).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Run B's scanner against B's work_dir.
+    deskd::app::schedule::fire_due_reminders(
+        &socket_b,
+        "agent-b",
+        home_b.path(),
+        chrono::Utc::now(),
+    )
+    .await;
+
+    let timeout = tokio::time::timeout(Duration::from_millis(300), rx_b.recv()).await;
+    assert!(
+        timeout.is_err(),
+        "agent B saw agent A's reminder — work_dir isolation broken"
+    );
+
+    // Now run A's scanner against A's work_dir — it MUST deliver.
+    let socket_a = temp_socket_path();
+    let mut rx_a = spawn_bus_listener(&socket_a).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    deskd::app::schedule::fire_due_reminders(
+        &socket_a,
+        "agent-a",
+        home_a.path(),
+        chrono::Utc::now(),
+    )
+    .await;
+    let got = tokio::time::timeout(Duration::from_secs(2), rx_a.recv())
+        .await
+        .expect("agent A scanner did not deliver own reminder")
+        .expect("channel closed");
+    assert_eq!(got, "a-only");
+
+    let _ = std::fs::remove_file(&socket_a);
+    let _ = std::fs::remove_file(&socket_b);
+}
+
+/// #467 end-to-end: a reminder written to `{work_dir}/.deskd/reminders/` by
+/// `create_reminder_full` must be discovered and delivered by
+/// `fire_due_reminders` when given the same `work_dir`. This is the integration
+/// test required by the issue's acceptance criteria.
+#[tokio::test]
+async fn create_reminder_fires_through_scanner_with_work_dir() {
+    let home = isolated_work_dir();
+    let work_dir = home.path();
+
+    let socket = temp_socket_path();
+    let mut rx = spawn_bus_listener(&socket).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Past `at` so the first scan immediately fires.
+    create_reminder_full(
+        work_dir,
+        "agent:watch",
+        "tick",
+        Some(chrono::Utc::now() - chrono::Duration::seconds(1)),
+        Some("1m"),
+        None,
+    )
+    .unwrap();
+
+    deskd::app::schedule::fire_due_reminders(&socket, "agent-watch", work_dir, chrono::Utc::now())
+        .await;
+
+    let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("reminder did not fire")
+        .expect("channel closed");
+    assert_eq!(got, "tick");
+
+    // The file must still exist (recurring re-arm).
+    let dir = deskd::config::reminders_dir_for(work_dir);
+    let files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
+        .collect();
+    assert_eq!(
+        files.len(),
+        1,
+        "recurring reminder must be re-armed, not deleted"
+    );
+
     let _ = std::fs::remove_file(&socket);
 }

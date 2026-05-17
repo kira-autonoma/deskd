@@ -1,6 +1,12 @@
 //! Infrastructure path helpers — deskd filesystem layout.
 //!
-//! All paths are relative to `$HOME/.deskd/`.
+//! Two flavours of helper coexist:
+//!   - `*_for(work_dir)` — resolves under an explicit agent work directory.
+//!     Use these in all production code (#467).
+//!   - `state_dir() / log_dir() / reminders_dir()` — resolve via `$HOME`. Kept
+//!     for tests that isolate via a tempdir-as-`HOME`. Do NOT add new
+//!     production call sites — `$HOME` differs between processes that share
+//!     a work_dir (root daemon vs. per-user agent subprocess).
 
 use std::path::{Path, PathBuf};
 
@@ -75,7 +81,28 @@ pub fn log_dir() -> PathBuf {
     dir
 }
 
-/// Where one-shot reminder JSON files are stored: `~/.deskd/reminders/`.
+/// Where reminder JSON files are stored for a specific agent:
+/// `{work_dir}/.deskd/reminders/`.
+///
+/// This is the canonical reminder location. Both the MCP `create_reminder` tool
+/// (which runs in the agent's subprocess, typically as a non-root `unix_user`)
+/// and the firing scanner (which runs in `deskd serve`, often as root) MUST
+/// agree on this path. Resolving via `work_dir` instead of `$HOME` is the fix
+/// for #467 — see that issue for the bug story.
+///
+/// Mirrors the `agent_bus_socket(work_dir)` convention.
+pub fn reminders_dir_for(work_dir: &Path) -> PathBuf {
+    let dir = work_dir.join(".deskd").join("reminders");
+    std::fs::create_dir_all(&dir).ok();
+    dir
+}
+
+/// `$HOME`-based reminder dir. Retained ONLY for tests that isolate via a
+/// tempdir-as-`HOME`; production code paths resolve via
+/// `reminders_dir_for(work_dir)` since #467. New call sites must use the
+/// explicit `work_dir` variant — process `$HOME` differs between the MCP
+/// subprocess (per-agent) and the `deskd serve` daemon (often root), which
+/// is the exact split that caused #467.
 pub fn reminders_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
     let dir = PathBuf::from(home).join(".deskd").join("reminders");
@@ -120,5 +147,35 @@ mod tests {
         assert!(base.is_dir());
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn reminders_dir_for_resolves_under_work_dir() {
+        // The canonical layout is `{work_dir}/.deskd/reminders/`. Confirm the
+        // helper returns that exact path AND creates it.
+        let base = tempfile::tempdir().unwrap();
+        let work_dir = base.path();
+
+        let dir = reminders_dir_for(work_dir);
+        assert_eq!(dir, work_dir.join(".deskd").join("reminders"));
+        assert!(dir.is_dir(), "reminders_dir_for must create the directory");
+    }
+
+    #[test]
+    fn reminders_dir_for_two_work_dirs_are_isolated() {
+        // The #467 fix relies on two agents with different work_dirs getting
+        // ENTIRELY separate reminder dirs — otherwise reminders cross-pollute
+        // between agents running on the same host.
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+
+        let dir_a = reminders_dir_for(a.path());
+        let dir_b = reminders_dir_for(b.path());
+        assert_ne!(dir_a, dir_b);
+
+        // Writing into one dir must not affect the other.
+        std::fs::write(dir_a.join("marker.json"), "{}").unwrap();
+        let b_entries: Vec<_> = std::fs::read_dir(&dir_b).unwrap().flatten().collect();
+        assert!(b_entries.is_empty(), "agent B's reminder dir leaked from A");
     }
 }
