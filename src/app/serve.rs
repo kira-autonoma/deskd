@@ -388,6 +388,8 @@ pub async fn serve(config_path: String) -> Result<()> {
                     peer_name: peer.peer_name.clone(),
                     reconnect_backoff_secs: peer.reconnect_backoff_secs.clone(),
                     deskd_version: env!("CARGO_PKG_VERSION").to_string(),
+                    subscribe_patterns: peer.subscribe.clone(),
+                    subscribe_inboxes: peer.subscribe_inboxes.clone(),
                 };
                 tokio::spawn(async move {
                     if let Err(e) = federation::run_peer(cfg, cancel_clone).await {

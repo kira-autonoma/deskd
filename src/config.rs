@@ -141,6 +141,14 @@ pub struct FederationPeerConfig {
     /// `[1, 2, 5, 15, 60]`.
     #[serde(default = "default_federation_backoff")]
     pub reconnect_backoff_secs: Vec<u64>,
+    /// Topic-glob subscriptions the peer issues to the hub on every
+    /// connect (#463). Wildcards: `*` one segment, `>` everything below.
+    #[serde(default)]
+    pub subscribe: Vec<String>,
+    /// Inbox subscriptions issued on every connect — preserves the existing
+    /// `inbox/<name>` shape (#463).
+    #[serde(default, alias = "subscribe_inbox")]
+    pub subscribe_inboxes: Vec<String>,
 }
 
 impl Default for FederationPeerConfig {
@@ -150,6 +158,8 @@ impl Default for FederationPeerConfig {
             hub_addr: String::new(),
             peer_name: String::new(),
             reconnect_backoff_secs: default_federation_backoff(),
+            subscribe: Vec::new(),
+            subscribe_inboxes: Vec::new(),
         }
     }
 }

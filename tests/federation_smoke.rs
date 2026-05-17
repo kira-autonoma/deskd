@@ -62,6 +62,8 @@ async fn hub_and_peer_complete_handshake_and_register() {
         peer_name: "smoke-peer".into(),
         reconnect_backoff_secs: vec![1],
         deskd_version: "test".into(),
+        subscribe_patterns: Vec::new(),
+        subscribe_inboxes: Vec::new(),
     };
     let peer_cancel_clone = peer_cancel.clone();
     let _peer = tokio::spawn(async move {

@@ -1,5 +1,6 @@
 //! Federation wire frame — extends the bus envelope with control frames
-//! (`hello`, `welcome`, `ping`, `pong`) used between federated peers.
+//! (`hello`, `welcome`, `ping`, `pong`, `subscribe`, …) used between
+//! federated peers.
 //!
 //! Serialized as line-delimited JSON with a discriminating `type` field, the
 //! same shape used on the local UNIX socket bus. The `bus_message` variant
@@ -7,18 +8,17 @@
 //! byte-identical between transports — this is the protocol-parity property
 //! the federation epic (#461) calls out.
 //!
-//! # Scope (child 1 of #461)
-//!
-//! The bus is intentionally not federated yet — hubs receive `BusMessage`
-//! frames from connected peers and discard them with a debug log line. Child 2
-//! adds subscriptions + forwarding; child 3 adds replay.
-//!
 //! # Frame variants
 //!
 //! - `hello { peer_name, deskd_version, capabilities }` — peer → hub on connect
 //! - `welcome { hub_name, replay_supported }` — hub → peer in reply
 //! - `ping` / `pong` — bidirectional keepalive (every 30s, two missed → drop)
-//! - `bus_message(BusMessage)` — wraps a regular bus wire message
+//! - `subscribe { pattern }` — peer → hub, register a topic glob subscription
+//! - `unsubscribe { pattern }` — peer → hub, drop a topic glob subscription
+//! - `subscribe_inbox { name }` — peer → hub, register an inbox subscription
+//! - `bus_message(BusMessage)` — raw bus frame (legacy / no origin tracking)
+//! - `forward { origin, message }` — federated bus frame carrying its `origin`
+//!   peer name, used by both directions for loop prevention.
 
 use serde::{Deserialize, Serialize};
 
@@ -49,9 +49,22 @@ pub enum FederationFrame {
     Ping,
     /// Keepalive reply.
     Pong,
+    /// Topic-glob subscription. Issued by a peer; the hub starts forwarding
+    /// matching local frames over this peer link.
+    Subscribe { pattern: String },
+    /// Drop a previously registered glob subscription.
+    Unsubscribe { pattern: String },
+    /// Inbox subscription — preserves the existing `inbox/<name>` shape, with
+    /// optional cross-device `inbox/<name>@<peer>` routing handled by the hub.
+    SubscribeInbox { name: String },
     /// A regular bus message; transparently wrapped so the inner JSON is the
-    /// same shape the UNIX socket bus speaks.
+    /// same shape the UNIX socket bus speaks. No `origin` tracking — used for
+    /// legacy / hello-time greetings only. Federated traffic uses `Forward`.
     BusMessage(BusMessage),
+    /// A federated bus frame with origin tracking. Always sent in both
+    /// directions for actual fanout — the hub uses `origin` to suppress
+    /// forwarding back to the publishing peer, preventing loops.
+    Forward { origin: String, message: BusMessage },
 }
 
 impl FederationFrame {
@@ -164,6 +177,79 @@ mod tests {
                 assert_eq!(m.source, "agent-a");
             }
             _ => panic!("expected BusMessage"),
+        }
+    }
+
+    #[test]
+    fn subscribe_roundtrip() {
+        let frame = FederationFrame::Subscribe {
+            pattern: "voice.*".into(),
+        };
+        let line = frame.to_line().unwrap();
+        assert!(line.contains("\"type\":\"subscribe\""));
+        let back = FederationFrame::parse(line.trim_end()).unwrap();
+        match back {
+            FederationFrame::Subscribe { pattern } => assert_eq!(pattern, "voice.*"),
+            _ => panic!("expected Subscribe"),
+        }
+    }
+
+    #[test]
+    fn unsubscribe_roundtrip() {
+        let frame = FederationFrame::Unsubscribe {
+            pattern: "voice.*".into(),
+        };
+        let line = frame.to_line().unwrap();
+        assert!(line.contains("\"type\":\"unsubscribe\""));
+        let back = FederationFrame::parse(line.trim_end()).unwrap();
+        assert!(matches!(back, FederationFrame::Unsubscribe { .. }));
+    }
+
+    #[test]
+    fn subscribe_inbox_roundtrip() {
+        let frame = FederationFrame::SubscribeInbox {
+            name: "personal".into(),
+        };
+        let line = frame.to_line().unwrap();
+        assert!(line.contains("\"type\":\"subscribe_inbox\""));
+        let back = FederationFrame::parse(line.trim_end()).unwrap();
+        match back {
+            FederationFrame::SubscribeInbox { name } => assert_eq!(name, "personal"),
+            _ => panic!("expected SubscribeInbox"),
+        }
+    }
+
+    #[test]
+    fn forward_roundtrip_preserves_origin_and_inner() {
+        let inner = BusMessage {
+            id: "msg-7".into(),
+            source: "agent.x".into(),
+            target: "voice.recorded".into(),
+            payload: serde_json::json!({"transcript": "hi"}),
+            reply_to: None,
+            metadata: BusMetadata {
+                priority: 5,
+                fresh: false,
+            },
+        };
+        let frame = FederationFrame::Forward {
+            origin: "phone".into(),
+            message: inner,
+        };
+        let line = frame.to_line().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(parsed["type"], "forward");
+        assert_eq!(parsed["origin"], "phone");
+        assert_eq!(parsed["message"]["id"], "msg-7");
+        // Roundtrip.
+        let back = FederationFrame::parse(line.trim_end()).unwrap();
+        match back {
+            FederationFrame::Forward { origin, message } => {
+                assert_eq!(origin, "phone");
+                assert_eq!(message.id, "msg-7");
+                assert_eq!(message.target, "voice.recorded");
+            }
+            _ => panic!("expected Forward"),
         }
     }
 
