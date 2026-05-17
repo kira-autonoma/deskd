@@ -1,4 +1,5 @@
 pub mod discord;
+pub mod federation;
 pub mod telegram;
 pub mod web;
 

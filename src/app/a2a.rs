@@ -235,6 +235,7 @@ mod tests {
             a2a,
             alerts: None,
             web: None,
+            federation: None,
         }
     }
 

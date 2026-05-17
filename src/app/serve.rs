@@ -3,6 +3,7 @@
 use anyhow::Result;
 use tracing::info;
 
+use crate::app::adapters::federation;
 use crate::app::adapters::web;
 use crate::app::{agent, alerts, bus, bus_api, config_reload, worker, workflow};
 use crate::config;
@@ -328,12 +329,107 @@ pub async fn serve(config_path: String) -> Result<()> {
         }
     }
 
+    // ── Federation (#462) ─────────────────────────────────────────────────
+    // Foundation only — hub binds, peer dials, hello/welcome + keepalive.
+    // Bus routing is intentionally not wired (lands in #463). When both
+    // `federation.hub.enabled` and `federation.peer.enabled` are false (or
+    // the block is absent) this is a complete no-op.
+    if let Some(fed_cfg) = workspace.federation.clone() {
+        let hub_handle = if let Some(hub) = fed_cfg.hub.clone() {
+            if hub.enabled {
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let cancel_clone = cancel.clone();
+                let registry_path = federation::PeerRegistry::default_path();
+                match federation::PeerRegistry::open(&registry_path) {
+                    Ok(reg) => {
+                        let registry = std::sync::Arc::new(reg);
+                        let identity = federation::hub::shared_identity_from_cli();
+                        let hub_name = hostname_or("deskd-hub");
+                        let cfg = federation::hub::HubConfig {
+                            bind: hub.bind.clone(),
+                            hub_name,
+                            tailscale_binary: "tailscale".into(),
+                            peer_timeout_secs: hub.peer_timeout_secs,
+                        };
+                        let bind = hub.bind.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) =
+                                federation::run_hub(cfg, identity, registry, cancel_clone).await
+                            {
+                                tracing::error!(error = %e, "federation hub exited");
+                            }
+                        });
+                        info!(bind = %bind, "started federation hub");
+                        Some(cancel)
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            path = %registry_path.display(),
+                            "federation hub disabled — failed to open peer registry"
+                        );
+                        None
+                    }
+                }
+            } else {
+                info!("federation.hub present but disabled — skipping");
+                None
+            }
+        } else {
+            None
+        };
+
+        let peer_handle = if let Some(peer) = fed_cfg.peer.clone() {
+            if peer.enabled {
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let cancel_clone = cancel.clone();
+                let cfg = federation::peer::PeerDialerConfig {
+                    hub_addr: peer.hub_addr.clone(),
+                    peer_name: peer.peer_name.clone(),
+                    reconnect_backoff_secs: peer.reconnect_backoff_secs.clone(),
+                    deskd_version: env!("CARGO_PKG_VERSION").to_string(),
+                };
+                tokio::spawn(async move {
+                    if let Err(e) = federation::run_peer(cfg, cancel_clone).await {
+                        tracing::error!(error = %e, "federation peer exited");
+                    }
+                });
+                info!(hub = %peer.hub_addr, peer = %peer.peer_name, "started federation peer dialer");
+                Some(cancel)
+            } else {
+                info!("federation.peer present but disabled — skipping");
+                None
+            }
+        } else {
+            None
+        };
+
+        // Plumb cancellation through Ctrl-C alongside the rest of shutdown.
+        if hub_handle.is_some() || peer_handle.is_some() {
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                if let Some(h) = hub_handle {
+                    h.cancel();
+                }
+                if let Some(p) = peer_handle {
+                    p.cancel();
+                }
+            });
+        }
+    }
+
     info!("all agents started — press Ctrl-C to stop");
 
     tokio::signal::ctrl_c().await?;
     config::ServeState::remove();
     info!("shutting down");
     Ok(())
+}
+
+fn hostname_or(default: &str) -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .unwrap_or_else(|| default.to_string())
 }
 
 /// Run a single poll-and-dispatch loop for the alert manager.

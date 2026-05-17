@@ -76,6 +76,94 @@ pub struct WorkspaceConfig {
     /// (eventually) agent dashboards. Absent or `enabled: false` → no impact.
     #[serde(default)]
     pub web: Option<WebConfig>,
+    /// Federated bus (#462). When present, deskd participates in a federated
+    /// mesh-wide bus over Tailscale. The block has optional `hub` and `peer`
+    /// sub-blocks — each can be independently enabled. Absent or both
+    /// disabled → no impact on existing single-host deployments.
+    #[serde(default)]
+    pub federation: Option<FederationConfig>,
+}
+
+/// Federation block — `federation:` in workspace.yaml (#462).
+///
+/// Holds hub + peer config. Both are optional; either or both may be enabled
+/// on the same deskd instance (a hub can also peer with another hub).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct FederationConfig {
+    /// Hub config — when enabled, deskd listens for incoming peer connections
+    /// on a TCP socket bound to the Tailscale interface.
+    #[serde(default)]
+    pub hub: Option<FederationHubConfig>,
+    /// Peer config — when enabled, deskd dials a remote hub on startup and
+    /// stays connected with reconnect/backoff.
+    #[serde(default)]
+    pub peer: Option<FederationPeerConfig>,
+}
+
+/// Hub-side federation config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FederationHubConfig {
+    /// Master switch. `false` (or block absent) → listener does not bind.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Bind spec: either `interface:port` (e.g. `tailscale0:7770`) or
+    /// explicit `ip:port` (e.g. `100.64.0.1:7770`). Default `tailscale0:7770`.
+    #[serde(default = "default_federation_bind")]
+    pub bind: String,
+    /// Idle disconnect timeout in seconds. Default 60.
+    #[serde(default = "default_federation_peer_timeout")]
+    pub peer_timeout_secs: u64,
+}
+
+impl Default for FederationHubConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: default_federation_bind(),
+            peer_timeout_secs: default_federation_peer_timeout(),
+        }
+    }
+}
+
+/// Peer-side federation config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FederationPeerConfig {
+    /// Master switch. `false` (or block absent) → dialer does not start.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Hub address (`host:port`). MagicDNS / IP / tailnet hostname accepted.
+    #[serde(default)]
+    pub hub_addr: String,
+    /// Name this peer self-identifies as in the hub's peer registry.
+    #[serde(default)]
+    pub peer_name: String,
+    /// Reconnect backoff sequence in seconds. Empty / missing → default
+    /// `[1, 2, 5, 15, 60]`.
+    #[serde(default = "default_federation_backoff")]
+    pub reconnect_backoff_secs: Vec<u64>,
+}
+
+impl Default for FederationPeerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hub_addr: String::new(),
+            peer_name: String::new(),
+            reconnect_backoff_secs: default_federation_backoff(),
+        }
+    }
+}
+
+fn default_federation_bind() -> String {
+    "tailscale0:7770".to_string()
+}
+
+fn default_federation_peer_timeout() -> u64 {
+    60
+}
+
+fn default_federation_backoff() -> Vec<u64> {
+    vec![1, 2, 5, 15, 60]
 }
 
 /// Web control panel config — `web:` in workspace.yaml (#443).
@@ -1028,6 +1116,95 @@ web:
         let cfg: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
         let web = cfg.web.expect("web block parsed");
         assert!(!web.enabled);
+    }
+
+    #[test]
+    fn test_workspace_config_federation_block_absent() {
+        let yaml = r#"
+agents:
+  - name: kira
+    work_dir: /home/kira
+"#;
+        let cfg: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.federation.is_none());
+    }
+
+    #[test]
+    fn test_workspace_config_federation_hub_full() {
+        let yaml = r#"
+agents:
+  - name: kira
+    work_dir: /home/kira
+federation:
+  hub:
+    enabled: true
+    bind: tailscale0:7770
+    peer_timeout_secs: 90
+"#;
+        let cfg: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let fed = cfg.federation.expect("federation block parsed");
+        let hub = fed.hub.expect("hub block parsed");
+        assert!(hub.enabled);
+        assert_eq!(hub.bind, "tailscale0:7770");
+        assert_eq!(hub.peer_timeout_secs, 90);
+        assert!(fed.peer.is_none());
+    }
+
+    #[test]
+    fn test_workspace_config_federation_hub_disabled_does_not_listen() {
+        // Block present but disabled → caller treats this as zero-impact.
+        let yaml = r#"
+agents:
+  - name: kira
+    work_dir: /home/kira
+federation:
+  hub:
+    enabled: false
+"#;
+        let cfg: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let hub = cfg.federation.unwrap().hub.unwrap();
+        assert!(!hub.enabled);
+        // Defaults are still populated for stability.
+        assert_eq!(hub.bind, "tailscale0:7770");
+        assert_eq!(hub.peer_timeout_secs, 60);
+    }
+
+    #[test]
+    fn test_workspace_config_federation_peer_full() {
+        let yaml = r#"
+agents:
+  - name: mac
+    work_dir: /home/mac
+federation:
+  peer:
+    enabled: true
+    hub_addr: vps.example.ts.net:7770
+    peer_name: mac
+    reconnect_backoff_secs: [1, 5, 30]
+"#;
+        let cfg: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let peer = cfg.federation.unwrap().peer.unwrap();
+        assert!(peer.enabled);
+        assert_eq!(peer.hub_addr, "vps.example.ts.net:7770");
+        assert_eq!(peer.peer_name, "mac");
+        assert_eq!(peer.reconnect_backoff_secs, vec![1, 5, 30]);
+    }
+
+    #[test]
+    fn test_workspace_config_federation_peer_backoff_default() {
+        let yaml = r#"
+agents:
+  - name: mac
+    work_dir: /home/mac
+federation:
+  peer:
+    enabled: true
+    hub_addr: vps:7770
+    peer_name: mac
+"#;
+        let cfg: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let peer = cfg.federation.unwrap().peer.unwrap();
+        assert_eq!(peer.reconnect_backoff_secs, vec![1, 2, 5, 15, 60]);
     }
 
     #[test]
