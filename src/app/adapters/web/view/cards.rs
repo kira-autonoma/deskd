@@ -20,6 +20,17 @@ pub fn agent_card_id(name: &str) -> String {
 /// Render a single agent card. The output is an `<article>` element wrapping
 /// every field listed in the issue spec.
 pub fn agent_card(summary: &AgentSummary) -> String {
+    agent_card_with_disk(summary, None)
+}
+
+/// Render a single agent card with a known disk-snapshot timestamp.
+/// `disk_updated_at` populates the «updated N ago» tooltip on the home-dir
+/// row (#446). When `None`, the row carries no tooltip — same as the
+/// pre-#446 rendering.
+pub fn agent_card_with_disk(
+    summary: &AgentSummary,
+    disk_updated_at: Option<DateTime<Utc>>,
+) -> String {
     let id = agent_card_id(&summary.name);
     let status_class = status_class(&summary.status);
     let status_label = html_escape(&summary.status);
@@ -29,23 +40,32 @@ pub fn agent_card(summary: &AgentSummary) -> String {
         .map(format_relative)
         .unwrap_or_else(em_dash);
     let context_line = render_context(summary);
-    let home_dir = summary
+    let home_dir_value = summary
         .home_dir_bytes
         .map(format_bytes)
         .unwrap_or_else(em_dash);
+    let home_dir_cell = match disk_updated_at {
+        Some(ts) => format!(
+            r#"<dd title="updated {short} ({iso})">{value}</dd>"#,
+            short = html_escape(&format_relative(ts)),
+            iso = html_escape(&ts.to_rfc3339()),
+            value = home_dir_value,
+        ),
+        None => format!("<dd>{}</dd>", home_dir_value),
+    };
     let task_block = render_task_block(summary);
 
     format!(
         r#"<article id="{id}" class="agent-card">
   <header class="agent-card__head">
-    <h2 class="agent-card__name">{name}</h2>
+    <h2 class="agent-card__name"><a href="/agent/{name}">{name}</a></h2>
     <span class="agent-card__status agent-card__status--{status_class}">{status_label}</span>
     <span class="agent-card__model">{model}</span>
   </header>
   <dl class="agent-card__rows">
     <dt>last activity</dt><dd>{last_activity}</dd>
     {context_line}
-    <dt>home dir</dt><dd>{home_dir}</dd>
+    <dt>home dir</dt>{home_dir_cell}
     {task_block}
   </dl>
 </article>"#,
@@ -56,7 +76,7 @@ pub fn agent_card(summary: &AgentSummary) -> String {
         model = model,
         last_activity = last_activity,
         context_line = context_line,
-        home_dir = home_dir,
+        home_dir_cell = home_dir_cell,
         task_block = task_block,
     )
 }
@@ -64,7 +84,20 @@ pub fn agent_card(summary: &AgentSummary) -> String {
 /// Render the agent list section (used by the initial dashboard render).
 /// Empty state is friendly: encourages the user to add an agent rather than
 /// looking like an error.
+///
+/// Backward-compatible wrapper around [`agents_section_with_disk`] that
+/// passes `None` for the disk timestamp.
 pub fn agents_section(summaries: &[AgentSummary]) -> String {
+    agents_section_with_disk(summaries, None)
+}
+
+/// Same as [`agents_section`] but with the cached disk-metrics
+/// `updated_at` propagated to each card so the home-dir cell carries an
+/// «updated N ago» tooltip (#446).
+pub fn agents_section_with_disk(
+    summaries: &[AgentSummary],
+    disk_updated_at: Option<DateTime<Utc>>,
+) -> String {
     if summaries.is_empty() {
         return r#"<section class="agents agents--empty" hx-ext="sse" sse-connect="/events">
   <p class="agents__empty">No agents configured. Add one in <code>workspace.yaml</code>.</p>
@@ -76,7 +109,7 @@ pub fn agents_section(summaries: &[AgentSummary]) -> String {
     out.push_str(r#"<section class="agents" hx-ext="sse" sse-connect="/events">"#);
     out.push('\n');
     for s in summaries {
-        out.push_str(&agent_card(s));
+        out.push_str(&agent_card_with_disk(s, disk_updated_at));
         out.push('\n');
     }
     out.push_str("</section>");

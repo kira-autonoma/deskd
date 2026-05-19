@@ -87,6 +87,48 @@ pub struct WorkspaceConfig {
     /// inboxes. Requires `web.enabled: true`; absent → endpoint not mounted.
     #[serde(default)]
     pub github_webhooks: Option<GitHubWebhookConfig>,
+    /// Disk/metrics collection (#446). When absent the disk collector still
+    /// runs with defaults (5 min interval, single volume `/`). The block is
+    /// optional purely so existing workspace.yaml files continue to parse
+    /// without modification.
+    #[serde(default)]
+    pub metrics: Option<MetricsConfig>,
+}
+
+/// Top-level metrics block — `metrics:` in workspace.yaml (#446).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct MetricsConfig {
+    /// Disk-metrics sub-block.
+    #[serde(default)]
+    pub disk: DiskMetricsConfig,
+}
+
+/// Disk-metrics configuration. Defaults mirror the issue spec: 300s and `["/"]`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DiskMetricsConfig {
+    /// Sample interval in seconds. Default 300 (5 min).
+    #[serde(default = "default_disk_interval_seconds")]
+    pub interval_seconds: u64,
+    /// Mountpoints passed to `df -BK`. Default `["/"]`.
+    #[serde(default = "default_disk_volumes")]
+    pub volumes: Vec<String>,
+}
+
+impl Default for DiskMetricsConfig {
+    fn default() -> Self {
+        Self {
+            interval_seconds: default_disk_interval_seconds(),
+            volumes: default_disk_volumes(),
+        }
+    }
+}
+
+fn default_disk_interval_seconds() -> u64 {
+    300
+}
+
+fn default_disk_volumes() -> Vec<String> {
+    vec!["/".to_string()]
 }
 
 /// Federation block — `federation:` in workspace.yaml (#462).
@@ -2120,5 +2162,57 @@ agents:
         );
         let cfg = UserConfig::load(cfg_path.to_str().unwrap()).unwrap();
         assert!(cfg.agents.is_empty());
+    }
+
+    // ── #446 metrics.disk.* parsing ──────────────────────────────────────
+
+    #[test]
+    fn test_workspace_config_metrics_defaults_when_block_absent() {
+        let yaml = r#"
+agents:
+  - name: kira
+    work_dir: /home/kira
+"#;
+        let cfg: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.metrics.is_none());
+        // Calling code uses DiskMetricsConfig::default() when the block is
+        // absent — verify those defaults match the issue spec.
+        let d = DiskMetricsConfig::default();
+        assert_eq!(d.interval_seconds, 300);
+        assert_eq!(d.volumes, vec!["/".to_string()]);
+    }
+
+    #[test]
+    fn test_workspace_config_metrics_disk_parses_overrides() {
+        let yaml = r#"
+agents:
+  - name: kira
+    work_dir: /home/kira
+metrics:
+  disk:
+    interval_seconds: 60
+    volumes: ["/", "/var"]
+"#;
+        let cfg: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let disk = cfg.metrics.unwrap().disk;
+        assert_eq!(disk.interval_seconds, 60);
+        assert_eq!(disk.volumes, vec!["/".to_string(), "/var".to_string()]);
+    }
+
+    #[test]
+    fn test_workspace_config_metrics_disk_uses_defaults_when_partial() {
+        // Only `interval_seconds` set — `volumes` should fall back to default.
+        let yaml = r#"
+agents:
+  - name: kira
+    work_dir: /home/kira
+metrics:
+  disk:
+    interval_seconds: 600
+"#;
+        let cfg: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        let disk = cfg.metrics.unwrap().disk;
+        assert_eq!(disk.interval_seconds, 600);
+        assert_eq!(disk.volumes, vec!["/".to_string()]);
     }
 }

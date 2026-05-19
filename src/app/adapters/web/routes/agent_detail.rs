@@ -12,6 +12,11 @@
 //! | POST   | `/agent/{name}/stop`                | First step — render «sure?»  |
 //! | POST   | `/agent/{name}/stop/confirm`        | Second step — actually stop  |
 //!
+//! The detail page also surfaces the per-agent disk breakdown (#446):
+//! the home-directory total + the top-N largest subdirectories, sampled
+//! via `du`. The breakdown is rendered as a dedicated section between
+//! the metadata grid and the action buttons.
+//!
 //! Every POST is CSRF-protected by comparing the form's `_csrf` field to
 //! the `csrf` claim embedded in the session cookie. Each successful
 //! invocation appends a single entry to the audit log via
@@ -32,7 +37,13 @@ use crate::app::adapters::web::data::{self, AgentDetail};
 use crate::app::adapters::web::dispatch::AgentCommand;
 use crate::app::adapters::web::routes::{client_ip, read_session_cookie, user_agent};
 use crate::app::adapters::web::state::WebState;
+use crate::app::adapters::web::view::{agent_disk_detail_html, format_bytes};
 use crate::app::adapters::web::{templates, view};
+use crate::app::metrics::{AgentBreakdownEntry, sample_agent_breakdown};
+
+/// Top-N subdirectories shown on the detail page (#446). The issue spec
+/// calls out «top 5».
+pub const BREAKDOWN_LIMIT: usize = 5;
 
 /// Query parameters supported by the detail page (carry the optional flash
 /// message + classification across the post/redirect/get cycle).
@@ -65,16 +76,51 @@ pub async fn detail(
         Err(resp) => return resp,
     };
 
-    match data::collect_agent_detail(&name).await {
-        Some(detail) => render_detail_page(
-            session_payload.telegram_id,
-            &session_payload.csrf,
-            &detail,
-            query.ok.as_deref(),
-            query.err.as_deref(),
-        ),
-        None => not_found_response(&name),
-    }
+    let detail = match data::collect_agent_detail(&name).await {
+        Some(d) => d,
+        None => return not_found_response(&name),
+    };
+
+    // #446: gather the per-agent disk breakdown so the detail page can
+    // surface a "top-N largest subdirectories" block alongside the
+    // metadata grid. Sources mirror the dashboard renderer: the cached
+    // `DiskSnapshot` for the home-dir total, an on-demand `du` sample
+    // for the per-directory entries.
+    let snap = state.metrics.snapshot().await;
+    let agent_sample = snap.lookup_agent(&name).cloned();
+    let home_dir_from_state = state
+        .agent_homes
+        .iter()
+        .find(|(n, _)| n == &name)
+        .map(|(_, h)| h.clone());
+    let home_dir_for_breakdown = home_dir_from_state
+        .as_deref()
+        .unwrap_or(detail.home_dir.as_str());
+    let breakdown: Vec<AgentBreakdownEntry> = if home_dir_for_breakdown.is_empty() {
+        Vec::new()
+    } else {
+        sample_agent_breakdown(home_dir_for_breakdown, BREAKDOWN_LIMIT).await
+    };
+    let total_bytes = agent_sample
+        .as_ref()
+        .and_then(|a| a.home_dir_bytes)
+        .or(detail.summary.home_dir_bytes);
+    let disk_html = agent_disk_detail_html(
+        Some(home_dir_for_breakdown),
+        total_bytes,
+        snap.updated_at,
+        &breakdown,
+        format_bytes,
+    );
+
+    render_detail_page(
+        session_payload.telegram_id,
+        &session_payload.csrf,
+        &detail,
+        &disk_html,
+        query.ok.as_deref(),
+        query.err.as_deref(),
+    )
 }
 
 /// `GET /agent/{name}/events` — per-agent SSE stream. Filters the global
@@ -328,10 +374,12 @@ fn csrf_ok(payload: &session::SessionPayload, form: &ActionForm) -> bool {
     !form._csrf.is_empty() && form._csrf == payload.csrf
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_detail_page(
     telegram_id: i64,
     csrf: &str,
     detail: &AgentDetail,
+    disk_html: &str,
     ok: Option<&str>,
     err: Option<&str>,
 ) -> Response {
@@ -347,6 +395,7 @@ fn render_detail_page(
         &header_html,
         &flash_html,
         &meta_html,
+        disk_html,
         &actions_html,
         &tasks_html,
         &bus_tail_html,

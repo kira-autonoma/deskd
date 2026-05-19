@@ -32,6 +32,7 @@ pub mod mcp_protocol;
 pub mod mcp_service;
 pub mod mcp_tools;
 pub mod message;
+pub mod metrics;
 pub mod process_builder;
 pub mod schedule;
 pub mod scope;

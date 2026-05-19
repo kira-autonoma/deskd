@@ -45,7 +45,8 @@ use crate::app::adapters::web::auth::session;
 use crate::app::adapters::web::data::{self, AgentSummary};
 use crate::app::adapters::web::routes::read_session_cookie;
 use crate::app::adapters::web::state::WebState;
-use crate::app::adapters::web::view::{agent_card, agent_card_id};
+use crate::app::adapters::web::view::{agent_card, agent_card_id, vps_strip};
+use crate::app::metrics::DiskMetrics;
 
 /// Default polling interval (1s, per AC).
 const DEFAULT_TICK_INTERVAL: Duration = Duration::from_millis(1_000);
@@ -134,7 +135,7 @@ pub async fn events(
         DEFAULT_KEEPALIVE
     };
 
-    let stream = build_event_stream(tick_interval, q.max_ticks);
+    let stream = build_event_stream(tick_interval, q.max_ticks, Some(state.metrics.clone()));
     let sse = Sse::new(stream).keep_alive(KeepAlive::new().interval(keepalive));
     let mut resp = sse.into_response();
     // SSE-specific headers — axum sets content-type, but reverse proxies
@@ -158,10 +159,17 @@ pub struct StreamState {
     pub initial_sent: bool,
     pub tick_interval: Duration,
     pub max_ticks: u64,
+    /// Disk-metrics handle (#446). When present, the stream watches for
+    /// snapshot timestamp changes and emits a `metrics.updated` event +
+    /// swaps the VPS strip HTML.
+    pub metrics: Option<DiskMetrics>,
+    /// Last seen disk snapshot `updated_at` — used to detect whether the
+    /// collector has produced a fresh sample since the previous tick.
+    pub last_metrics_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl StreamState {
-    fn new(tick_interval: Duration, max_ticks: u64) -> Self {
+    fn new(tick_interval: Duration, max_ticks: u64, metrics: Option<DiskMetrics>) -> Self {
         Self {
             prev: HashMap::new(),
             tick_count: 0,
@@ -169,6 +177,8 @@ impl StreamState {
             initial_sent: false,
             tick_interval,
             max_ticks,
+            metrics,
+            last_metrics_at: None,
         }
     }
 }
@@ -177,8 +187,9 @@ impl StreamState {
 pub fn build_event_stream(
     tick_interval: Duration,
     max_ticks: u64,
+    metrics: Option<DiskMetrics>,
 ) -> Pin<Box<dyn Stream<Item = Result<Event, Infallible>> + Send>> {
-    let state = StreamState::new(tick_interval, max_ticks);
+    let state = StreamState::new(tick_interval, max_ticks, metrics);
     let stream = futures::stream::unfold(state, |mut state| async move {
         if !state.initial_sent {
             state.initial_sent = true;
@@ -199,7 +210,34 @@ pub fn build_event_stream(
         }
         state.tick_count += 1;
 
-        let summaries = data::collect_agent_summaries().await;
+        // Disk metrics: read the current snapshot so summaries are
+        // hydrated with home_dir_bytes. Also detect timestamp advances
+        // and emit a `metrics.updated` event + VPS strip swap.
+        let disk = if let Some(m) = &state.metrics {
+            Some(m.snapshot().await)
+        } else {
+            None
+        };
+        if let Some(snap) = &disk {
+            let new_at = snap.updated_at;
+            if new_at != state.last_metrics_at {
+                state.last_metrics_at = new_at;
+                if state.last_metrics_at.is_some() {
+                    if let Ok(ev) = Event::default().event("metrics.updated").json_data(snap) {
+                        state.queued.push_back(ev);
+                    }
+                    // Re-render the VPS strip and push an htmx swap so the
+                    // browser refreshes the top-of-page numbers without
+                    // a polling loop.
+                    let overview = data::collect_vps_overview(Some(snap));
+                    let strip_html = vps_strip(&overview);
+                    let ev = Event::default().event("vps-strip").data(strip_html);
+                    state.queued.push_back(ev);
+                }
+            }
+        }
+
+        let summaries = data::collect_agent_summaries(disk.as_ref()).await;
         let events = diff_to_events(&state.prev, &summaries);
         state.queued.extend(events);
         state.prev = summaries.into_iter().map(|s| (s.name.clone(), s)).collect();
@@ -418,7 +456,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_event_stream_yields_finite_count_when_max_ticks_set() {
-        let mut s = build_event_stream(Duration::from_millis(10), 2);
+        let mut s = build_event_stream(Duration::from_millis(10), 2, None);
         let mut count = 0;
         let timeout = tokio::time::sleep(Duration::from_secs(2));
         tokio::pin!(timeout);

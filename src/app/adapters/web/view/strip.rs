@@ -11,25 +11,59 @@ use super::{cards::format_bytes, html_escape};
 
 /// Render the VPS overview strip as an HTML fragment. Designed to fit a
 /// 375px-wide phone viewport without horizontal scroll.
+///
+/// When `disk_snapshot.volumes` is non-empty, every volume is rendered
+/// as its own `vps-strip__item` (`<mount> <free> / <total> (<pct> used)`).
+/// Otherwise we fall back to the convenience-field summary so the strip
+/// still has something to show during warm-start.
 pub fn vps_strip(overview: &VpsOverview) -> String {
     let version = html_escape(&overview.deskd_version);
     let uptime = overview.uptime.map(format_uptime).unwrap_or_else(em_dash);
-    let disk_label = match (overview.disk_free_bytes, overview.disk_total_bytes) {
-        (Some(free), Some(total)) if total > 0 => {
-            format!("{} free / {}", format_bytes(free), format_bytes(total),)
+
+    let disk_items = if !overview.disk_snapshot.volumes.is_empty() {
+        let mut out = String::new();
+        for v in &overview.disk_snapshot.volumes {
+            let mount = html_escape(&v.mount);
+            let label = match (v.size_bytes, v.avail_bytes, v.used_bytes) {
+                (Some(size), Some(avail), Some(used)) if size > 0 => {
+                    let pct = (used as f64 / size as f64 * 100.0).round() as u64;
+                    format!(
+                        "{} free / {} ({}% used)",
+                        format_bytes(avail),
+                        format_bytes(size),
+                        pct
+                    )
+                }
+                _ => em_dash(),
+            };
+            out.push_str(&format!(
+                r#"  <span class="vps-strip__item"><strong>{mount}</strong> {label}</span>
+"#,
+            ));
         }
-        _ => em_dash(),
+        out
+    } else {
+        // Warm-start: single summary item built from convenience fields.
+        let disk_label = match (overview.disk_free_bytes, overview.disk_total_bytes) {
+            (Some(free), Some(total)) if total > 0 => {
+                format!("{} free / {}", format_bytes(free), format_bytes(total))
+            }
+            _ => em_dash(),
+        };
+        format!(
+            r#"  <span class="vps-strip__item"><strong>disk</strong> {disk_label}</span>
+"#,
+        )
     };
 
     format!(
         r#"<section class="vps-strip">
   <span class="vps-strip__item"><strong>deskd</strong> v{version}</span>
   <span class="vps-strip__item"><strong>uptime</strong> {uptime}</span>
-  <span class="vps-strip__item"><strong>disk</strong> {disk_label}</span>
-</section>"#,
+{disk_items}</section>"#,
         version = version,
         uptime = uptime,
-        disk_label = disk_label,
+        disk_items = disk_items,
     )
 }
 
@@ -75,6 +109,7 @@ mod tests {
             uptime: Some(Duration::from_secs(3600 + 600)), // 1h 10m
             disk_total_bytes: None,
             disk_free_bytes: None,
+            disk_snapshot: Default::default(),
         }
     }
 
@@ -99,6 +134,42 @@ mod tests {
         o.disk_total_bytes = Some(80 * 1024 * 1024 * 1024);
         let html = vps_strip(&o);
         assert!(html.contains("40.00 GiB free / 80.00 GiB"));
+    }
+
+    #[test]
+    fn strip_renders_one_item_per_volume_from_snapshot() {
+        use crate::app::metrics::{DiskSnapshot, VolumeSample};
+        let mut snap = DiskSnapshot::default();
+        snap.volumes.push(VolumeSample {
+            mount: "/".into(),
+            source: Some("/dev/vda1".into()),
+            size_bytes: Some(80 * 1024 * 1024 * 1024),
+            used_bytes: Some(20 * 1024 * 1024 * 1024),
+            avail_bytes: Some(60 * 1024 * 1024 * 1024),
+        });
+        snap.volumes.push(VolumeSample {
+            mount: "/var".into(),
+            source: Some("/dev/vda2".into()),
+            size_bytes: Some(10 * 1024 * 1024 * 1024),
+            used_bytes: Some(2 * 1024 * 1024 * 1024),
+            avail_bytes: Some(8 * 1024 * 1024 * 1024),
+        });
+        let o = VpsOverview {
+            deskd_version: "0.1.0".into(),
+            uptime: Some(Duration::from_secs(10)),
+            disk_total_bytes: Some(80 * 1024 * 1024 * 1024),
+            disk_free_bytes: Some(60 * 1024 * 1024 * 1024),
+            disk_snapshot: snap,
+        };
+        let html = vps_strip(&o);
+        // Both mounts present with their own free/total labels.
+        assert!(html.contains("<strong>/</strong>"));
+        assert!(html.contains("<strong>/var</strong>"));
+        assert!(html.contains("60.00 GiB free / 80.00 GiB"));
+        assert!(html.contains("8.00 GiB free / 10.00 GiB"));
+        // Percent used (20/80 = 25%, 2/10 = 20%).
+        assert!(html.contains("25% used"));
+        assert!(html.contains("20% used"));
     }
 
     #[test]

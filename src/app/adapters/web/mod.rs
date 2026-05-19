@@ -30,6 +30,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+use crate::app::metrics::DiskMetrics;
 use crate::config::{GitHubWebhookConfig, WebConfig};
 
 use audit::AuditLog;
@@ -44,17 +45,21 @@ use state::{WebState, system_now};
 /// Construct a `WebState` with the production dispatchers pointed at the
 /// supplied bus socket. `github_webhooks` is forwarded onto state so the
 /// `POST /webhooks/github` route knows which subscriptions are active.
+/// `metrics` + `agent_homes` are wired in so the dashboard and
+/// `/metrics/refresh` see live data.
 pub fn build_state(
     cfg: WebConfig,
     bus_socket: String,
     github_webhooks: Option<GitHubWebhookConfig>,
+    metrics: DiskMetrics,
+    agent_homes: Vec<(String, String)>,
 ) -> Result<WebState> {
     let secret_bytes = secret::load_or_create()?;
     let bus_dispatcher = Arc::new(BusDispatcher::new(bus_socket.clone(), "web".to_string()));
     let telegram: Arc<dyn TelegramDispatcher> = bus_dispatcher.clone();
     let bus: Arc<dyn BusSender> = bus_dispatcher;
     let agent_commands: Arc<dyn AgentCommandDispatcher> = Arc::new(BusAgentCommandDispatcher::new(
-        bus_socket,
+        bus_socket.clone(),
         "web".to_string(),
     ));
     Ok(build_state_with_dispatcher(
@@ -64,10 +69,14 @@ pub fn build_state(
         bus,
         agent_commands,
         github_webhooks,
+        metrics,
+        agent_homes,
+        Some(bus_socket),
     ))
 }
 
 /// Like [`build_state`] but with injected dispatchers (used by tests).
+#[allow(clippy::too_many_arguments)]
 pub fn build_state_with_dispatcher(
     cfg: WebConfig,
     secret_bytes: [u8; 32],
@@ -75,6 +84,9 @@ pub fn build_state_with_dispatcher(
     bus: Arc<dyn BusSender>,
     agent_commands: Arc<dyn AgentCommandDispatcher>,
     github_webhooks: Option<GitHubWebhookConfig>,
+    metrics: DiskMetrics,
+    agent_homes: Vec<(String, String)>,
+    metrics_bus: Option<String>,
 ) -> WebState {
     let audit_path = audit::expand_home(&cfg.audit_log);
     let limit = cfg.rate_limit.auth_requests_per_hour;
@@ -92,6 +104,9 @@ pub fn build_state_with_dispatcher(
         github_deliveries: github_webhook::shared_dedupe(),
         agent_commands,
         now: system_now(),
+        metrics,
+        agent_homes: Arc::new(agent_homes),
+        metrics_bus: metrics_bus.map(Arc::new),
     }
 }
 
@@ -101,10 +116,12 @@ pub async fn run(
     cfg: WebConfig,
     bus_socket: String,
     github_webhooks: Option<GitHubWebhookConfig>,
+    metrics: DiskMetrics,
+    agent_homes: Vec<(String, String)>,
     cancel: CancellationToken,
 ) -> Result<()> {
     let bind = cfg.bind.clone();
-    let state = build_state(cfg, bus_socket, github_webhooks)?;
+    let state = build_state(cfg, bus_socket, github_webhooks, metrics, agent_homes)?;
     run_with_state(state, bind, cancel).await
 }
 

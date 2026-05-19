@@ -6,6 +6,7 @@ pub mod github_webhook;
 pub mod health;
 pub mod login;
 pub mod logout;
+pub mod metrics;
 pub mod sse;
 pub mod static_assets;
 

@@ -22,11 +22,20 @@ pub async fn dashboard(State(state): State<WebState>, headers: HeaderMap) -> Res
 
     match session_payload {
         Some(p) => {
-            let summaries = data::collect_agent_summaries().await;
-            let overview = data::collect_vps_overview();
+            let disk = state.metrics.snapshot().await;
+            let summaries = data::collect_agent_summaries(Some(&disk)).await;
+            let overview = data::collect_vps_overview(Some(&disk));
             let strip_html = view::vps_strip(&overview);
-            let agents_html = view::agents_section(&summaries);
-            let html = templates::dashboard_page(p.telegram_id, &p.csrf, &strip_html, &agents_html);
+            let agents_html = view::agents_section_with_disk(&summaries, disk.updated_at);
+            // «Refresh now» form posts to /metrics/refresh with the current CSRF.
+            let refresh_html = templates::metrics_refresh_form(&p.csrf);
+            let html = templates::dashboard_page(
+                p.telegram_id,
+                &p.csrf,
+                &refresh_html,
+                &strip_html,
+                &agents_html,
+            );
             html_response(html)
         }
         None => {

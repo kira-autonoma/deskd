@@ -22,6 +22,7 @@ use serde::Serialize;
 
 use crate::app::agent;
 use crate::app::context_size;
+use crate::app::metrics::DiskSnapshot;
 use crate::app::tasklog::{self, TaskLog};
 
 /// Snapshot of a single agent rendered as one card on the dashboard.
@@ -61,10 +62,14 @@ pub struct VpsOverview {
     /// doesn't track its own start time today — we display deskd's uptime as
     /// best-effort from `/proc/self/stat` on Linux, otherwise `None`.
     pub uptime: Option<Duration>,
-    /// Total disk bytes (#446 cache); `None` until that lands.
+    /// Total disk bytes for the primary volume (#446 cache).
     pub disk_total_bytes: Option<u64>,
-    /// Free disk bytes (#446 cache); `None` until that lands.
+    /// Free disk bytes for the primary volume (#446 cache).
     pub disk_free_bytes: Option<u64>,
+    /// Full snapshot from the #446 cache — included so the renderer can
+    /// build a per-volume strip when more than one volume is configured.
+    /// Empty `volumes` is treated identically to "no data".
+    pub disk_snapshot: DiskSnapshot,
 }
 
 /// Per-agent detail page payload (#445).
@@ -117,7 +122,7 @@ pub async fn collect_agent_detail(name: &str) -> Option<AgentDetail> {
         .unwrap_or_default();
     let ctx = context_by_agent.get(&state.config.name);
 
-    let summary = summarise(&state, ctx);
+    let summary = summarise(&state, ctx, None);
     let busy = summary.status == "working";
     let session_short = if state.session_id.is_empty() {
         String::new()
@@ -172,7 +177,11 @@ fn recent_tasklog_rows(agent_name: &str, limit: usize) -> Vec<TaskLogRow> {
 /// Build [`AgentSummary`] entries for every known agent. Errors from the
 /// underlying data sources are logged-and-swallowed so a single broken file
 /// can't take down the dashboard; the failed entries fall back to defaults.
-pub async fn collect_agent_summaries() -> Vec<AgentSummary> {
+///
+/// When `disk` is `Some`, per-agent `home_dir_bytes` are filled from the
+/// supplied disk snapshot. Callers without a metrics handle pass `None`
+/// and every card shows an em-dash for disk usage.
+pub async fn collect_agent_summaries(disk: Option<&DiskSnapshot>) -> Vec<AgentSummary> {
     let states = agent::list().await.unwrap_or_default();
     let context_by_agent: HashMap<String, context_size::SessionContext> = context_size::gather()
         .await
@@ -181,7 +190,12 @@ pub async fn collect_agent_summaries() -> Vec<AgentSummary> {
 
     let mut out = Vec::with_capacity(states.len());
     for state in &states {
-        out.push(summarise(state, context_by_agent.get(&state.config.name)));
+        let disk_entry = disk.and_then(|s| s.lookup_agent(&state.config.name));
+        out.push(summarise(
+            state,
+            context_by_agent.get(&state.config.name),
+            disk_entry.and_then(|e| e.home_dir_bytes),
+        ));
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
@@ -200,6 +214,7 @@ fn snapshot_to_map(
 fn summarise(
     state: &agent::AgentState,
     ctx: Option<&context_size::SessionContext>,
+    home_dir_bytes: Option<u64>,
 ) -> AgentSummary {
     let last_activity = latest_task_ts(&state.config.name);
     let (context_tokens, context_threshold) = match ctx {
@@ -229,7 +244,7 @@ fn summarise(
         last_activity,
         context_tokens,
         context_threshold,
-        home_dir_bytes: None, // #446 disk cache not yet wired.
+        home_dir_bytes,
         current_task,
         task_running_for,
     }
@@ -254,14 +269,23 @@ fn latest_task_ts(agent_name: &str) -> Option<DateTime<Utc>> {
         .map(|dt| dt.with_timezone(&Utc))
 }
 
-/// Build the VPS overview strip. Only deskd version is universally known
-/// today; uptime is best-effort and disk metrics defer to #446.
-pub fn collect_vps_overview() -> VpsOverview {
+/// Build the VPS overview strip. Disk metrics come from the #446
+/// snapshot — pass `None` (or an empty snapshot) when none is available
+/// yet and the renderer draws em-dashes.
+///
+/// The first volume in `disk.volumes` populates the convenience
+/// `disk_total_bytes` / `disk_free_bytes` fields. The full snapshot is
+/// also returned via `disk_snapshot` so the strip renderer can list
+/// every configured volume.
+pub fn collect_vps_overview(disk: Option<&DiskSnapshot>) -> VpsOverview {
+    let snap = disk.cloned().unwrap_or_default();
+    let primary = snap.volumes.first();
     VpsOverview {
         deskd_version: env!("CARGO_PKG_VERSION").to_string(),
         uptime: process_uptime(),
-        disk_total_bytes: None,
-        disk_free_bytes: None,
+        disk_total_bytes: primary.and_then(|v| v.size_bytes),
+        disk_free_bytes: primary.and_then(|v| v.avail_bytes),
+        disk_snapshot: snap,
     }
 }
 
@@ -368,7 +392,7 @@ mod tests {
         let mut state = mk_state("a", "working", 0);
         state.session_start = Some((Utc::now() - chrono::Duration::seconds(30)).to_rfc3339());
         state.current_task = "review PR #441".into();
-        let s = summarise(&state, None);
+        let s = summarise(&state, None, None);
         assert_eq!(s.status, "working");
         assert_eq!(s.current_task.as_deref(), Some("review PR #441"));
         let dur = s.task_running_for.unwrap();
@@ -378,7 +402,7 @@ mod tests {
     #[test]
     fn summarise_omits_running_for_when_idle() {
         let state = mk_state("a", "idle", 0);
-        let s = summarise(&state, None);
+        let s = summarise(&state, None, None);
         assert!(s.task_running_for.is_none());
         assert!(s.current_task.is_none());
     }
@@ -395,14 +419,39 @@ mod tests {
             auto_compact_threshold: 300_000,
             stale: false,
         };
-        let s = summarise(&state, Some(&ctx));
+        let s = summarise(&state, Some(&ctx), None);
         assert_eq!(s.context_tokens, Some(120_000));
         assert_eq!(s.context_threshold, Some(300_000));
     }
 
     #[test]
+    fn summarise_uses_supplied_home_dir_bytes() {
+        let state = mk_state("a", "idle", 0);
+        let s = summarise(&state, None, Some(412 * 1024 * 1024));
+        assert_eq!(s.home_dir_bytes, Some(412 * 1024 * 1024));
+    }
+
+    #[test]
     fn vps_overview_reports_pkg_version() {
-        let v = collect_vps_overview();
+        let v = collect_vps_overview(None);
         assert_eq!(v.deskd_version, env!("CARGO_PKG_VERSION"));
+        assert!(v.disk_total_bytes.is_none());
+    }
+
+    #[test]
+    fn vps_overview_uses_first_volume_for_convenience_fields() {
+        use crate::app::metrics::{DiskSnapshot, VolumeSample};
+        let mut snap = DiskSnapshot::default();
+        snap.volumes.push(VolumeSample {
+            mount: "/".into(),
+            source: Some("/dev/vda1".into()),
+            size_bytes: Some(100),
+            used_bytes: Some(60),
+            avail_bytes: Some(40),
+        });
+        let v = collect_vps_overview(Some(&snap));
+        assert_eq!(v.disk_total_bytes, Some(100));
+        assert_eq!(v.disk_free_bytes, Some(40));
+        assert_eq!(v.disk_snapshot.volumes.len(), 1);
     }
 }

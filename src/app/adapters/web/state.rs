@@ -7,6 +7,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::app::metrics::DiskMetrics;
 use crate::config::{GitHubWebhookConfig, WebConfig};
 
 use super::audit::AuditLog;
@@ -44,6 +45,16 @@ pub struct WebState {
     /// closure that returns a fixed timestamp so cookie/expiry semantics are
     /// deterministic.
     pub now: NowFn,
+    /// Disk metrics cache + sampler handle (#446). Shared with the
+    /// collector task; the dashboard reads `.snapshot()` and the
+    /// `POST /metrics/refresh` route triggers an out-of-cycle sample.
+    pub metrics: DiskMetrics,
+    /// Resolved `(agent_name, home_dir)` pairs for the per-agent disk
+    /// breakdown route. Empty when no agents are configured.
+    pub agent_homes: Arc<Vec<(String, String)>>,
+    /// Bus socket used by `/metrics/refresh` to emit `metrics.updated`
+    /// after a manual sample. `None` in tests that don't run a bus.
+    pub metrics_bus: Option<Arc<String>>,
 }
 
 /// Returns a unix timestamp in seconds. Boxed so we can stub it out in tests.

@@ -8,10 +8,13 @@ pub mod cards;
 pub mod detail;
 pub mod strip;
 
-pub use cards::{agent_card, agent_card_id, agents_section, format_bytes, format_relative};
+pub use cards::{
+    agent_card, agent_card_id, agent_card_with_disk, agents_section, agents_section_with_disk,
+    format_bytes, format_relative,
+};
 pub use detail::{
-    confirm_page_body, detail_actions, detail_bus_tail, detail_flash, detail_header, detail_meta,
-    detail_tasks,
+    agent_disk_detail_html, confirm_page_body, detail_actions, detail_bus_tail, detail_flash,
+    detail_header, detail_meta, detail_tasks,
 };
 pub use strip::vps_strip;
 

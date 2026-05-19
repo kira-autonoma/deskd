@@ -5,6 +5,7 @@ use tracing::info;
 
 use crate::app::adapters::federation;
 use crate::app::adapters::web;
+use crate::app::metrics;
 use crate::app::{agent, alerts, bus, bus_api, config_reload, worker, workflow};
 use crate::config;
 use crate::infra::diag;
@@ -291,6 +292,33 @@ pub async fn serve(config_path: String) -> Result<()> {
         }
     }
 
+    // ── Disk metrics collector (#446) ────────────────────────────────────
+    // Runs independently of the web adapter — disabling `web:` does not
+    // disable metrics. The collector is shared with the web adapter via
+    // `DiskMetrics`, so we have to spin it up before the web block.
+    let metrics_cfg = metrics::CollectorConfig::from_workspace(&workspace);
+    let disk_metrics = metrics::DiskMetrics::new(metrics::default_cache_path());
+    let metrics_bus_socket = workspace.agents.first().map(|a| a.bus_socket());
+    {
+        let collector_cancel = tokio_util::sync::CancellationToken::new();
+        metrics::spawn_collector(
+            disk_metrics.clone(),
+            metrics_cfg.clone(),
+            metrics_bus_socket.clone(),
+            collector_cancel.clone(),
+        );
+        info!(
+            interval_secs = metrics_cfg.interval.as_secs(),
+            volumes = metrics_cfg.volumes.len(),
+            agents = metrics_cfg.agents.len(),
+            "started disk metrics collector"
+        );
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            collector_cancel.cancel();
+        });
+    }
+
     // ── Web control panel (#443) ──────────────────────────────────────────
     // When workspace.yaml defines `web:` with `enabled: true`, start a single
     // axum HTTP server. The dispatch bus socket is taken from the first agent
@@ -306,9 +334,18 @@ pub async fn serve(config_path: String) -> Result<()> {
             let cancel_handle = cancel.clone();
             let bind = web_cfg.bind.clone();
             let github_webhooks = workspace.github_webhooks.clone();
+            let metrics_for_web = disk_metrics.clone();
+            let agent_homes_for_web = metrics_cfg.agents.clone();
             tokio::spawn(async move {
-                if let Err(e) =
-                    web::run(web_cfg, bus_socket.clone(), github_webhooks, cancel_handle).await
+                if let Err(e) = web::run(
+                    web_cfg,
+                    bus_socket.clone(),
+                    github_webhooks,
+                    metrics_for_web,
+                    agent_homes_for_web,
+                    cancel_handle,
+                )
+                .await
                 {
                     diag::error_event(
                         Some(&bus_socket),

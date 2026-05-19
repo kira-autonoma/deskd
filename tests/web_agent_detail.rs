@@ -112,6 +112,7 @@ fn build_state() -> (WebState, RecordingAgentCommandDispatcher, tempfile::TempDi
         Arc::new(commands.clone());
     let bus_sender: Arc<dyn deskd::app::adapters::web::dispatch::BusSender> =
         Arc::new(RecordingBusSender::new());
+    let metrics_cache = dir.path().join("disk-cache.json");
     let state = WebState {
         cfg: Arc::new(cfg_obj),
         secret: Arc::new(TEST_SECRET),
@@ -125,6 +126,9 @@ fn build_state() -> (WebState, RecordingAgentCommandDispatcher, tempfile::TempDi
         github_deliveries: shared_dedupe(),
         agent_commands: commands_arc,
         now: Arc::new(|| 1_700_000_000),
+        metrics: deskd::app::metrics::DiskMetrics::new(metrics_cache),
+        agent_homes: Arc::new(Vec::new()),
+        metrics_bus: None,
     };
     (state, commands, dir)
 }

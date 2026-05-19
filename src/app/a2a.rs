@@ -237,6 +237,7 @@ mod tests {
             web: None,
             federation: None,
             github_webhooks: None,
+            metrics: None,
         }
     }
 

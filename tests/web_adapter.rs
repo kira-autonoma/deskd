@@ -71,6 +71,7 @@ fn build_state(rate_limit: u32) -> (WebState, RecordingDispatcher, tempfile::Tem
     // a deterministic now-fn (1_700_000_000 = 2023-11-14 22:13:20 UTC).
     let bus_sender: Arc<dyn deskd::app::adapters::web::dispatch::BusSender> =
         Arc::new(RecordingBusSender::new());
+    let metrics_cache = dir.path().join("disk-cache.json");
     let state = WebState {
         cfg: Arc::new(cfg_obj.clone()),
         secret: Arc::new(TEST_SECRET),
@@ -84,6 +85,9 @@ fn build_state(rate_limit: u32) -> (WebState, RecordingDispatcher, tempfile::Tem
         github_deliveries: shared_dedupe(),
         agent_commands,
         now: Arc::new(|| 1_700_000_000),
+        metrics: deskd::app::metrics::DiskMetrics::new(metrics_cache),
+        agent_homes: Arc::new(Vec::new()),
+        metrics_bus: None,
     };
     (state, dispatcher, dir)
 }
