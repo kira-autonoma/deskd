@@ -34,12 +34,14 @@ use crate::config::{GitHubWebhookConfig, WebConfig};
 
 use audit::AuditLog;
 use auth::{magic_link::TokenStore, secret};
-use dispatch::{BusDispatcher, BusSender, TelegramDispatcher};
+use dispatch::{
+    AgentCommandDispatcher, BusAgentCommandDispatcher, BusDispatcher, BusSender, TelegramDispatcher,
+};
 use middleware::rate_limit::RateLimiter;
 use routes::github_webhook;
 use state::{WebState, system_now};
 
-/// Construct a `WebState` with the production dispatcher pointed at the
+/// Construct a `WebState` with the production dispatchers pointed at the
 /// supplied bus socket. `github_webhooks` is forwarded onto state so the
 /// `POST /webhooks/github` route knows which subscriptions are active.
 pub fn build_state(
@@ -48,14 +50,19 @@ pub fn build_state(
     github_webhooks: Option<GitHubWebhookConfig>,
 ) -> Result<WebState> {
     let secret_bytes = secret::load_or_create()?;
-    let bus_dispatcher = Arc::new(BusDispatcher::new(bus_socket, "web".to_string()));
+    let bus_dispatcher = Arc::new(BusDispatcher::new(bus_socket.clone(), "web".to_string()));
     let telegram: Arc<dyn TelegramDispatcher> = bus_dispatcher.clone();
     let bus: Arc<dyn BusSender> = bus_dispatcher;
+    let agent_commands: Arc<dyn AgentCommandDispatcher> = Arc::new(BusAgentCommandDispatcher::new(
+        bus_socket,
+        "web".to_string(),
+    ));
     Ok(build_state_with_dispatcher(
         cfg,
         secret_bytes,
         telegram,
         bus,
+        agent_commands,
         github_webhooks,
     ))
 }
@@ -66,6 +73,7 @@ pub fn build_state_with_dispatcher(
     secret_bytes: [u8; 32],
     dispatcher: Arc<dyn TelegramDispatcher>,
     bus: Arc<dyn BusSender>,
+    agent_commands: Arc<dyn AgentCommandDispatcher>,
     github_webhooks: Option<GitHubWebhookConfig>,
 ) -> WebState {
     let audit_path = audit::expand_home(&cfg.audit_log);
@@ -82,6 +90,7 @@ pub fn build_state_with_dispatcher(
         github_webhooks: github_webhooks.map(Arc::new),
         bus,
         github_deliveries: github_webhook::shared_dedupe(),
+        agent_commands,
         now: system_now(),
     }
 }

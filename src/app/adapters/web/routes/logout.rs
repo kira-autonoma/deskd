@@ -63,6 +63,7 @@ pub async fn logout(
             ua,
             ok: true,
             reason: None,
+            agent: None,
         })
         .await;
 

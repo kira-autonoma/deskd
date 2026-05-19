@@ -75,6 +75,119 @@ pub fn dashboard_page(
     )
 }
 
+/// Render the per-agent detail page (#445). Layout matches the issue mockup:
+/// header → flash → metadata → action buttons → tasklog → live SSE tail.
+#[allow(clippy::too_many_arguments)]
+pub fn agent_detail_page(
+    telegram_id: i64,
+    csrf: &str,
+    header_html: &str,
+    flash_html: &str,
+    meta_html: &str,
+    actions_html: &str,
+    tasks_html: &str,
+    bus_tail_html: &str,
+) -> String {
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>deskd · agent detail</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/dashboard.css">
+<script src="/static/htmx.min.js"></script>
+<script src="/static/htmx-sse.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <h1>deskd</h1>
+  <span class="topbar__user">tg:{telegram_id}</span>
+  <form class="topbar__logout" method="post" action="/logout">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <button type="submit">Log out</button>
+  </form>
+</header>
+<main class="detail">
+  {header_html}
+  {flash_html}
+  {meta_html}
+  {actions_html}
+  {tasks_html}
+  {bus_tail_html}
+</main>
+</body>
+</html>"#,
+        telegram_id = telegram_id,
+        csrf = html_escape(csrf),
+        header_html = header_html,
+        flash_html = flash_html,
+        meta_html = meta_html,
+        actions_html = actions_html,
+        tasks_html = tasks_html,
+        bus_tail_html = bus_tail_html,
+    )
+}
+
+/// Render the «Are you sure?» confirm page (#445).
+pub fn agent_confirm_page(
+    telegram_id: i64,
+    csrf: &str,
+    confirm_body_html: &str,
+    page_title: &str,
+) -> String {
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>deskd</h1>
+  <span class="topbar__user">tg:{telegram_id}</span>
+  <form class="topbar__logout" method="post" action="/logout">
+    <input type="hidden" name="_csrf" value="{csrf}">
+    <button type="submit">Log out</button>
+  </form>
+</header>
+{body}
+</body>
+</html>"#,
+        title = html_escape(page_title),
+        telegram_id = telegram_id,
+        csrf = html_escape(csrf),
+        body = confirm_body_html,
+    )
+}
+
+/// Render the not-found page for an unknown agent name. Returned with a
+/// 404 status by the GET handler.
+pub fn agent_not_found_page(name: &str) -> String {
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>deskd · not found</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+<main class="detail">
+  <p><a href="/">← back</a></p>
+  <h1>Agent not found</h1>
+  <p>No agent named <code>{}</code> is configured.</p>
+</main>
+</body>
+</html>"#,
+        html_escape(name)
+    )
+}
+
 /// Page shown after a successful magic-link request: tells the user the link
 /// has been dispatched. Kept on a separate URL so a refresh doesn't re-POST.
 pub fn link_sent_page() -> &'static str {

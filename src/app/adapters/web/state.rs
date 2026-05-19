@@ -11,7 +11,7 @@ use crate::config::{GitHubWebhookConfig, WebConfig};
 
 use super::audit::AuditLog;
 use super::auth::magic_link::TokenStore;
-use super::dispatch::{BusSender, TelegramDispatcher};
+use super::dispatch::{AgentCommandDispatcher, BusSender, TelegramDispatcher};
 use super::middleware::rate_limit::RateLimiter;
 use super::routes::github_webhook::DeliveryDedupe;
 
@@ -36,6 +36,10 @@ pub struct WebState {
     /// In-memory dedupe store for `X-GitHub-Delivery` ids — 10 minute TTL.
     /// Restart-safe loss is acceptable (GitHub retries deliveries on its own).
     pub github_deliveries: Arc<Mutex<DeliveryDedupe>>,
+    /// Per-agent command dispatcher (#445). Published as `{command: "…"}`
+    /// envelopes to `agent:<name>` on the bus by the production
+    /// implementation; tests inject a recording double.
+    pub agent_commands: Arc<dyn AgentCommandDispatcher>,
     /// Cached "now" provider — defaults to system time. Tests substitute a
     /// closure that returns a fixed timestamp so cookie/expiry semantics are
     /// deterministic.

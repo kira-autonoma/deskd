@@ -29,6 +29,14 @@ pub enum Event {
     LoginFailed,
     /// Session cookie cleared.
     Logout,
+    /// Operator hit the per-agent Restart button (#445). Audited regardless
+    /// of whether the runtime acted on it; the request is the auditable
+    /// event.
+    AgentRestart,
+    /// Operator hit the per-agent Force compact button (#445).
+    AgentCompact,
+    /// Operator hit the per-agent Stop button (#445).
+    AgentStop,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +51,9 @@ pub struct AuditEntry {
     /// "token_expired", etc.). `None` for successful events.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Agent the action targeted (#445). `None` for auth events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 /// Async-safe audit log writer. Cheap to clone; multiple handlers share the
@@ -126,6 +137,7 @@ mod tests {
             ua: "test".into(),
             ok: true,
             reason: None,
+            agent: None,
         })
         .await
         .unwrap();
@@ -138,6 +150,7 @@ mod tests {
             ua: "test".into(),
             ok: true,
             reason: None,
+            agent: None,
         })
         .await
         .unwrap();
@@ -166,6 +179,7 @@ mod tests {
             ua: "".into(),
             ok: true,
             reason: None,
+            agent: None,
         })
         .await
         .unwrap();
@@ -213,6 +227,7 @@ mod tests {
             ua: "x".into(),
             ok: false,
             reason: Some("not_whitelisted".into()),
+            agent: None,
         })
         .await
         .unwrap();

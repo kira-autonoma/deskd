@@ -64,6 +64,10 @@ fn build_state() -> (WebState, RecordingDispatcher, tempfile::TempDir) {
         Arc::new(dispatcher.clone());
     let bus_sender: Arc<dyn deskd::app::adapters::web::dispatch::BusSender> =
         Arc::new(RecordingBusSender::new());
+    let agent_commands: Arc<dyn deskd::app::adapters::web::dispatch::AgentCommandDispatcher> =
+        Arc::new(
+            deskd::app::adapters::web::dispatch::testing::RecordingAgentCommandDispatcher::new(),
+        );
     let state = WebState {
         cfg: Arc::new(cfg_obj),
         secret: Arc::new(TEST_SECRET),
@@ -75,6 +79,7 @@ fn build_state() -> (WebState, RecordingDispatcher, tempfile::TempDir) {
         github_webhooks: None,
         bus: bus_sender,
         github_deliveries: shared_dedupe(),
+        agent_commands,
         now: Arc::new(|| 1_700_000_000),
     };
     (state, dispatcher, dir)

@@ -1,4 +1,4 @@
-//! Telegram dispatch abstraction for the web adapter (#443).
+//! Telegram + agent-command dispatch abstractions for the web adapter (#443/#445).
 //!
 //! Sending a magic-link message to Telegram from the web adapter must NOT
 //! reach into the Telegram adapter directly — that would couple the two
@@ -7,10 +7,17 @@
 //! subscribed to `telegram.out:*` and forwards the text to Telegram (see
 //! `app::adapters::telegram::bus_loop`).
 //!
-//! `TelegramDispatcher` is a thin trait so integration tests can substitute
-//! a recording double without spinning up a unix bus.
+//! Structured agent commands (#445) follow the same shape — the web adapter
+//! publishes a `{command: "restart" | "compact" | "stop"}` payload to
+//! `agent:<name>`. The runtime decides what to do with it; the web adapter
+//! is only responsible for the request half of the contract.
+//!
+//! `TelegramDispatcher` and `AgentCommandDispatcher` are thin traits so
+//! integration tests can substitute recording doubles without spinning up
+//! a unix bus.
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 #[async_trait]
 pub trait TelegramDispatcher: Send + Sync + 'static {
@@ -84,9 +91,64 @@ impl BusSender for BusDispatcher {
     }
 }
 
+/// Structured per-agent command emitted by `/agent/<name>/<action>` (#445).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCommand {
+    /// Stop the agent process and respawn it with the same config + session.
+    Restart,
+    /// Trigger configured context compaction strategy immediately (#403).
+    Compact,
+    /// Stop the agent; do not respawn.
+    Stop,
+}
+
+impl AgentCommand {
+    /// Stable serde tag (`"restart"` / `"compact"` / `"stop"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentCommand::Restart => "restart",
+            AgentCommand::Compact => "compact",
+            AgentCommand::Stop => "stop",
+        }
+    }
+}
+
+/// Publish a structured command to `agent:<name>` on the bus. Implementations
+/// must be cheap to clone (`Arc<dyn ...>` is the prevailing pattern).
+#[async_trait]
+pub trait AgentCommandDispatcher: Send + Sync + 'static {
+    async fn send(&self, agent_name: &str, command: AgentCommand) -> anyhow::Result<()>;
+}
+
+/// Production command dispatcher: posts a `{command: "..."}` payload to
+/// `agent:<name>` via the existing per-agent bus.
+pub struct BusAgentCommandDispatcher {
+    pub bus_socket: String,
+    pub source: String,
+}
+
+impl BusAgentCommandDispatcher {
+    pub fn new(bus_socket: String, source: String) -> Self {
+        Self { bus_socket, source }
+    }
+}
+
+#[async_trait]
+impl AgentCommandDispatcher for BusAgentCommandDispatcher {
+    async fn send(&self, agent_name: &str, command: AgentCommand) -> anyhow::Result<()> {
+        // Send as the JSON payload `{"command": "<name>"}` — same shape the
+        // Telegram adapter uses for `/restart` so the runtime can listen on
+        // one envelope shape.
+        let target = format!("agent:{}", agent_name);
+        let payload_text = serde_json::json!({ "command": command.as_str() }).to_string();
+        crate::app::bus::send_message(&self.bus_socket, &self.source, &target, &payload_text).await
+    }
+}
+
 pub mod testing {
-    //! Recording dispatcher for tests. Public so integration tests in the
-    //! `tests/` tree can reuse it without re-declaring the trait impl.
+    //! Recording dispatchers for tests. Public so integration tests in the
+    //! `tests/` tree can reuse them without re-declaring the trait impls.
 
     use super::*;
     use std::sync::{Arc, Mutex};
@@ -145,5 +207,47 @@ pub mod testing {
                 .push((target.to_string(), text.to_string(), metadata));
             Ok(())
         }
+    }
+
+    /// Recording dispatcher for `AgentCommandDispatcher`. Used by the #445
+    /// integration tests to assert that POST handlers actually publish.
+    #[derive(Default, Clone)]
+    pub struct RecordingAgentCommandDispatcher {
+        pub sent: Arc<Mutex<Vec<(String, AgentCommand)>>>,
+    }
+
+    impl RecordingAgentCommandDispatcher {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        pub fn calls(&self) -> Vec<(String, AgentCommand)> {
+            self.sent.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl AgentCommandDispatcher for RecordingAgentCommandDispatcher {
+        async fn send(&self, agent_name: &str, command: AgentCommand) -> anyhow::Result<()> {
+            self.sent
+                .lock()
+                .unwrap()
+                .push((agent_name.to_string(), command));
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_command_serializes_snake_case() {
+        assert_eq!(AgentCommand::Restart.as_str(), "restart");
+        assert_eq!(AgentCommand::Compact.as_str(), "compact");
+        assert_eq!(AgentCommand::Stop.as_str(), "stop");
+        let v = serde_json::to_value(AgentCommand::Restart).unwrap();
+        assert_eq!(v, serde_json::json!("restart"));
     }
 }

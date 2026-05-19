@@ -149,6 +149,7 @@ pub async fn login_request(
             ua,
             ok: true,
             reason: None,
+            agent: None,
         })
         .await;
 
@@ -208,6 +209,7 @@ pub async fn login_consume(
             ua,
             ok: true,
             reason: None,
+            agent: None,
         })
         .await;
 
@@ -245,6 +247,7 @@ async fn log_failed(
             ua: ua.to_string(),
             ok: false,
             reason: Some(reason.to_string()),
+            agent: None,
         })
         .await;
 }

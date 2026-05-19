@@ -6,7 +6,9 @@ use axum::{
 };
 
 use super::middleware::headers::security_headers;
-use super::routes::{dashboard, github_webhook, health, login, logout, sse, static_assets};
+use super::routes::{
+    agent_detail, dashboard, github_webhook, health, login, logout, sse, static_assets,
+};
 use super::state::WebState;
 
 /// Build the axum router. Public so the integration tests can drive it
@@ -21,6 +23,17 @@ pub fn build(state: WebState) -> Router {
         .route("/login/consume", get(login::login_consume))
         .route("/logout", post(logout::logout))
         .route("/webhooks/github", post(github_webhook::github_webhook))
+        // ─── #445: per-agent detail + structured commands ───────────────
+        .route("/agent/{name}", get(agent_detail::detail))
+        .route("/agent/{name}/events", get(agent_detail::events))
+        .route("/agent/{name}/compact", post(agent_detail::compact))
+        .route(
+            "/agent/{name}/restart",
+            post(agent_detail::restart_confirm_form),
+        )
+        .route("/agent/{name}/restart/confirm", post(agent_detail::restart))
+        .route("/agent/{name}/stop", post(agent_detail::stop_confirm_form))
+        .route("/agent/{name}/stop/confirm", post(agent_detail::stop))
         .route("/static/htmx.min.js", get(static_assets::htmx_js))
         .route("/static/htmx-sse.js", get(static_assets::htmx_sse_js))
         .route("/static/dashboard.css", get(static_assets::dashboard_css))

@@ -22,7 +22,7 @@ use serde::Serialize;
 
 use crate::app::agent;
 use crate::app::context_size;
-use crate::app::tasklog;
+use crate::app::tasklog::{self, TaskLog};
 
 /// Snapshot of a single agent rendered as one card on the dashboard.
 ///
@@ -65,6 +65,108 @@ pub struct VpsOverview {
     pub disk_total_bytes: Option<u64>,
     /// Free disk bytes (#446 cache); `None` until that lands.
     pub disk_free_bytes: Option<u64>,
+}
+
+/// Per-agent detail page payload (#445).
+///
+/// Strictly an additive wrapper around [`AgentSummary`]: every dashboard
+/// field is preserved, plus the extra fields the issue spec demands
+/// (session id, home directory path, compaction strategy label, recent
+/// tasklog entries).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct AgentDetail {
+    pub summary: AgentSummary,
+    /// Session id (short — first 8 chars). Empty when no session has started.
+    pub session_id: String,
+    /// Absolute path to the agent's working directory.
+    pub home_dir: String,
+    /// Human-friendly compaction strategy label (e.g. "auto @ 80%", "manual").
+    pub compaction_strategy: String,
+    /// Up-to-N most recent tasklog entries, newest first.
+    pub recent_tasks: Vec<TaskLogRow>,
+    /// True when the agent has an in-flight task — used to block destructive
+    /// actions (`restart` / `stop` / `compact`) per the «Agent busy» AC.
+    pub busy: bool,
+}
+
+/// One row in the «Last tasks» list.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct TaskLogRow {
+    /// Status string from the tasklog ("ok", "error", "skip", "empty").
+    pub status: String,
+    /// RFC 3339 timestamp.
+    pub ts: String,
+    /// Truncated task summary text (first 60 chars per tasklog convention).
+    pub summary: String,
+    /// Wall-clock duration in milliseconds.
+    pub duration_ms: u64,
+}
+
+/// Default maximum number of tasklog rows surfaced on the detail page.
+pub const DETAIL_TASKLOG_LIMIT: usize = 10;
+
+/// Look up a single agent's detail payload by name. Returns `None` when no
+/// agent state file exists for that name (the caller turns this into a 404).
+pub async fn collect_agent_detail(name: &str) -> Option<AgentDetail> {
+    let states = crate::app::agent::list().await.unwrap_or_default();
+    let state = states.into_iter().find(|s| s.config.name == name)?;
+
+    let context_by_agent: HashMap<String, context_size::SessionContext> = context_size::gather()
+        .await
+        .map(snapshot_to_map)
+        .unwrap_or_default();
+    let ctx = context_by_agent.get(&state.config.name);
+
+    let summary = summarise(&state, ctx);
+    let busy = summary.status == "working";
+    let session_short = if state.session_id.is_empty() {
+        String::new()
+    } else {
+        state.session_id.chars().take(8).collect::<String>()
+    };
+    let compaction_strategy = compaction_strategy_label(&state.config);
+    let recent_tasks = recent_tasklog_rows(&state.config.name, DETAIL_TASKLOG_LIMIT);
+
+    Some(AgentDetail {
+        summary,
+        session_id: session_short,
+        home_dir: state.config.work_dir.clone(),
+        compaction_strategy,
+        recent_tasks,
+        busy,
+    })
+}
+
+/// Human-readable compaction strategy label. Falls back to "auto" when no
+/// explicit override is configured — matches the runtime default.
+fn compaction_strategy_label(cfg: &crate::app::agent::AgentConfig) -> String {
+    if let Some(threshold) = cfg.auto_compact_threshold_tokens {
+        return format!("auto @ {}k tokens", threshold / 1_000);
+    }
+    if let Some(fraction) = cfg.compact_threshold {
+        let pct = (fraction * 100.0).round() as u64;
+        return format!("auto @ {}%", pct);
+    }
+    "auto (default)".to_string()
+}
+
+fn recent_tasklog_rows(agent_name: &str, limit: usize) -> Vec<TaskLogRow> {
+    let mut entries = match tasklog::read_logs(agent_name, limit, None, None) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    // tasklog::read_logs returns oldest→newest; flip so the most recent
+    // row is rendered first.
+    entries.reverse();
+    entries
+        .into_iter()
+        .map(|t: TaskLog| TaskLogRow {
+            status: t.status,
+            ts: t.ts,
+            summary: t.task,
+            duration_ms: t.duration_ms,
+        })
+        .collect()
 }
 
 /// Build [`AgentSummary`] entries for every known agent. Errors from the
