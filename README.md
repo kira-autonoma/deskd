@@ -160,6 +160,56 @@ web:
 Bind is intentionally local. Front it with a reverse proxy (caddy, nginx) that
 terminates TLS, forwards `X-Forwarded-For`, and proxies to `127.0.0.1:8127`.
 
+### `github_webhooks:` — optional GitHub webhook adapter (#457)
+
+When the workspace defines a `github_webhooks:` block, the web adapter
+(requires `web.enabled: true`) mounts `POST /webhooks/github`. Signed payloads
+are HMAC-SHA256-verified against `secret` (constant-time compare against the
+`X-Hub-Signature-256` header), then matched against `subscriptions` and
+delivered to the configured bus targets.
+
+```yaml
+web:
+  enabled: true                       # required — endpoint is mounted on the web server
+  bind: 127.0.0.1:8127
+
+github_webhooks:
+  secret: "${GITHUB_WEBHOOK_SECRET}"  # shared HMAC-SHA256 secret; env-interpolated
+  subscriptions:
+    - repo: kgatilin/archai           # owner/name from payload.repository.full_name
+      events:
+        - pull_request.closed         # X-GitHub-Event + ".action" (both must match)
+        - pull_request_review.submitted
+        - issues.labeled
+      deliver_to: agent:kira          # any bus target — agent:<name>, queue:<name>, etc.
+    - repo: kgatilin/deskd
+      events:
+        - ping                        # bare event matches any action (also matches no action)
+        - pull_request
+      deliver_to: agent:kira
+```
+
+Configure the matching webhook on GitHub:
+
+- **Payload URL**: `https://deskd.example.com/webhooks/github` (the public host
+  of your reverse proxy).
+- **Content type**: `application/json` — form-encoded payloads cannot be HMAC-verified.
+- **Secret**: the same value as `secret:` above. Stored in the env so the
+  workspace YAML can be committed.
+- **SSL verification**: enabled.
+- **Events**: whichever ones you listed under `events` (or "Send me everything"
+  if you prefer to filter server-side).
+
+**Event matching.** Each `events:` entry is the `X-GitHub-Event` header value,
+optionally suffixed with `.action`. A bare event (e.g. `ping`, `pull_request`)
+matches any action — useful when you want every PR event regardless of state
+transition. A qualified event (e.g. `pull_request.closed`) matches only that
+action. Multiple subscriptions for the same repo are permitted and fan-out
+independently.
+
+Bad signatures return `401`; events not matching any subscription are ack'd
+with `200` and dropped. Each successful delivery is logged at `info`.
+
 ### Key paths
 
 | Path | Purpose |

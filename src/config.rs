@@ -82,6 +82,11 @@ pub struct WorkspaceConfig {
     /// disabled → no impact on existing single-host deployments.
     #[serde(default)]
     pub federation: Option<FederationConfig>,
+    /// GitHub webhook adapter (#457). When set, deskd's web adapter exposes
+    /// `POST /webhooks/github` and routes signed payloads to subscribed agent
+    /// inboxes. Requires `web.enabled: true`; absent → endpoint not mounted.
+    #[serde(default)]
+    pub github_webhooks: Option<GitHubWebhookConfig>,
 }
 
 /// Federation block — `federation:` in workspace.yaml (#462).
@@ -174,6 +179,35 @@ fn default_federation_peer_timeout() -> u64 {
 
 fn default_federation_backoff() -> Vec<u64> {
     vec![1, 2, 5, 15, 60]
+}
+
+/// GitHub webhook adapter config — `github_webhooks:` in workspace.yaml (#457).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct GitHubWebhookConfig {
+    /// Shared HMAC-SHA256 secret configured on the GitHub webhook. Typically
+    /// supplied via `${GITHUB_WEBHOOK_SECRET}`. Empty string → all incoming
+    /// requests are rejected with 401 (signature can never match).
+    #[serde(default)]
+    pub secret: String,
+    /// Per-repo subscription rules. Multiple subscriptions for the same repo
+    /// are permitted (e.g. fan-out to several agents).
+    #[serde(default)]
+    pub subscriptions: Vec<GitHubWebhookSubscription>,
+}
+
+/// One subscription entry. Matches when `repo` equals
+/// `payload.repository.full_name` and the resolved event-type is in `events`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GitHubWebhookSubscription {
+    /// `owner/name`, e.g. `kgatilin/archai`.
+    pub repo: String,
+    /// Event-type tokens. Format: `X-GitHub-Event` value, optionally with a
+    /// `.action` suffix (e.g. `pull_request.closed`, `issues.labeled`,
+    /// `pull_request_review.submitted`). Bare events match any action.
+    #[serde(default)]
+    pub events: Vec<String>,
+    /// Bus target receiving the message, e.g. `agent:kira`.
+    pub deliver_to: String,
 }
 
 /// Web control panel config — `web:` in workspace.yaml (#443).

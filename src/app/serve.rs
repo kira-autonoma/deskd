@@ -305,8 +305,11 @@ pub async fn serve(config_path: String) -> Result<()> {
             let cancel = tokio_util::sync::CancellationToken::new();
             let cancel_handle = cancel.clone();
             let bind = web_cfg.bind.clone();
+            let github_webhooks = workspace.github_webhooks.clone();
             tokio::spawn(async move {
-                if let Err(e) = web::run(web_cfg, bus_socket.clone(), cancel_handle).await {
+                if let Err(e) =
+                    web::run(web_cfg, bus_socket.clone(), github_webhooks, cancel_handle).await
+                {
                     diag::error_event(
                         Some(&bus_socket),
                         "web",

@@ -1,6 +1,7 @@
 //! Route handlers for the web adapter (#443).
 
 pub mod dashboard;
+pub mod github_webhook;
 pub mod health;
 pub mod login;
 pub mod logout;

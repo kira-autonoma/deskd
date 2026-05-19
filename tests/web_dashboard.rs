@@ -24,10 +24,11 @@ use axum::http::{Request, StatusCode, header};
 use deskd::app::adapters::web::audit::AuditLog;
 use deskd::app::adapters::web::auth::{magic_link::TokenStore, session};
 use deskd::app::adapters::web::data::AgentSummary;
-use deskd::app::adapters::web::dispatch::testing::RecordingDispatcher;
+use deskd::app::adapters::web::dispatch::testing::{RecordingBusSender, RecordingDispatcher};
 use deskd::app::adapters::web::middleware::rate_limit::RateLimiter;
 use deskd::app::adapters::web::router;
 use deskd::app::adapters::web::routes::SESSION_COOKIE_NAME;
+use deskd::app::adapters::web::routes::github_webhook::shared_dedupe;
 use deskd::app::adapters::web::routes::sse::diff_to_events;
 use deskd::app::adapters::web::state::WebState;
 use deskd::config::{WebConfig, WebRateLimitConfig};
@@ -61,6 +62,8 @@ fn build_state() -> (WebState, RecordingDispatcher, tempfile::TempDir) {
     let dispatcher = RecordingDispatcher::new();
     let dispatcher_arc: Arc<dyn deskd::app::adapters::web::dispatch::TelegramDispatcher> =
         Arc::new(dispatcher.clone());
+    let bus_sender: Arc<dyn deskd::app::adapters::web::dispatch::BusSender> =
+        Arc::new(RecordingBusSender::new());
     let state = WebState {
         cfg: Arc::new(cfg_obj),
         secret: Arc::new(TEST_SECRET),
@@ -69,6 +72,9 @@ fn build_state() -> (WebState, RecordingDispatcher, tempfile::TempDir) {
         rate_limiter_tg: Arc::new(RateLimiter::new(20, 3600)),
         audit: AuditLog::new(audit_path),
         telegram: dispatcher_arc,
+        github_webhooks: None,
+        bus: bus_sender,
+        github_deliveries: shared_dedupe(),
         now: Arc::new(|| 1_700_000_000),
     };
     (state, dispatcher, dir)

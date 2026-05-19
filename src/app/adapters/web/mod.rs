@@ -30,28 +30,43 @@ use anyhow::Result;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use crate::config::WebConfig;
+use crate::config::{GitHubWebhookConfig, WebConfig};
 
 use audit::AuditLog;
 use auth::{magic_link::TokenStore, secret};
-use dispatch::{BusDispatcher, TelegramDispatcher};
+use dispatch::{BusDispatcher, BusSender, TelegramDispatcher};
 use middleware::rate_limit::RateLimiter;
+use routes::github_webhook;
 use state::{WebState, system_now};
 
 /// Construct a `WebState` with the production dispatcher pointed at the
-/// supplied bus socket.
-pub fn build_state(cfg: WebConfig, bus_socket: String) -> Result<WebState> {
+/// supplied bus socket. `github_webhooks` is forwarded onto state so the
+/// `POST /webhooks/github` route knows which subscriptions are active.
+pub fn build_state(
+    cfg: WebConfig,
+    bus_socket: String,
+    github_webhooks: Option<GitHubWebhookConfig>,
+) -> Result<WebState> {
     let secret_bytes = secret::load_or_create()?;
-    let dispatcher: Arc<dyn TelegramDispatcher> =
-        Arc::new(BusDispatcher::new(bus_socket, "web".to_string()));
-    Ok(build_state_with_dispatcher(cfg, secret_bytes, dispatcher))
+    let bus_dispatcher = Arc::new(BusDispatcher::new(bus_socket, "web".to_string()));
+    let telegram: Arc<dyn TelegramDispatcher> = bus_dispatcher.clone();
+    let bus: Arc<dyn BusSender> = bus_dispatcher;
+    Ok(build_state_with_dispatcher(
+        cfg,
+        secret_bytes,
+        telegram,
+        bus,
+        github_webhooks,
+    ))
 }
 
-/// Like [`build_state`] but with an injected dispatcher (used by tests).
+/// Like [`build_state`] but with injected dispatchers (used by tests).
 pub fn build_state_with_dispatcher(
     cfg: WebConfig,
     secret_bytes: [u8; 32],
     dispatcher: Arc<dyn TelegramDispatcher>,
+    bus: Arc<dyn BusSender>,
+    github_webhooks: Option<GitHubWebhookConfig>,
 ) -> WebState {
     let audit_path = audit::expand_home(&cfg.audit_log);
     let limit = cfg.rate_limit.auth_requests_per_hour;
@@ -64,15 +79,23 @@ pub fn build_state_with_dispatcher(
         rate_limiter_tg: Arc::new(RateLimiter::new(limit, 3600)),
         audit: AuditLog::new(audit_path),
         telegram: dispatcher,
+        github_webhooks: github_webhooks.map(Arc::new),
+        bus,
+        github_deliveries: github_webhook::shared_dedupe(),
         now: system_now(),
     }
 }
 
 /// Start the web adapter HTTP server. Returns when `cancel` is triggered or
 /// `axum::serve` exits with an error. Bound to `cfg.bind`.
-pub async fn run(cfg: WebConfig, bus_socket: String, cancel: CancellationToken) -> Result<()> {
+pub async fn run(
+    cfg: WebConfig,
+    bus_socket: String,
+    github_webhooks: Option<GitHubWebhookConfig>,
+    cancel: CancellationToken,
+) -> Result<()> {
     let bind = cfg.bind.clone();
-    let state = build_state(cfg, bus_socket)?;
+    let state = build_state(cfg, bus_socket, github_webhooks)?;
     run_with_state(state, bind, cancel).await
 }
 

@@ -24,11 +24,12 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use deskd::app::adapters::web::audit::AuditLog;
 use deskd::app::adapters::web::auth::{magic_link::TokenStore, session};
-use deskd::app::adapters::web::dispatch::testing::RecordingDispatcher;
+use deskd::app::adapters::web::dispatch::testing::{RecordingBusSender, RecordingDispatcher};
 use deskd::app::adapters::web::middleware::headers::{CSP_VALUE, HSTS_VALUE};
 use deskd::app::adapters::web::middleware::rate_limit::RateLimiter;
 use deskd::app::adapters::web::router;
 use deskd::app::adapters::web::routes::SESSION_COOKIE_NAME;
+use deskd::app::adapters::web::routes::github_webhook::shared_dedupe;
 use deskd::app::adapters::web::state::WebState;
 use deskd::config::{WebConfig, WebRateLimitConfig};
 use tower::ServiceExt;
@@ -64,6 +65,8 @@ fn build_state(rate_limit: u32) -> (WebState, RecordingDispatcher, tempfile::Tem
 
     // Build the state manually so we can inject the recording dispatcher AND
     // a deterministic now-fn (1_700_000_000 = 2023-11-14 22:13:20 UTC).
+    let bus_sender: Arc<dyn deskd::app::adapters::web::dispatch::BusSender> =
+        Arc::new(RecordingBusSender::new());
     let state = WebState {
         cfg: Arc::new(cfg_obj.clone()),
         secret: Arc::new(TEST_SECRET),
@@ -72,6 +75,9 @@ fn build_state(rate_limit: u32) -> (WebState, RecordingDispatcher, tempfile::Tem
         rate_limiter_tg: Arc::new(RateLimiter::new(rate_limit, 3600)),
         audit: AuditLog::new(audit_path),
         telegram: dispatcher_arc,
+        github_webhooks: None,
+        bus: bus_sender,
+        github_deliveries: shared_dedupe(),
         now: Arc::new(|| 1_700_000_000),
     };
     (state, dispatcher, dir)
