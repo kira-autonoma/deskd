@@ -247,7 +247,9 @@ pub fn split_command(command: &[String]) -> (&str, &[String]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::config_types::{ConfigAgentKind, ConfigAgentRuntime, ConfigSessionMode};
+    use crate::domain::config_types::{
+        ConfigAgentKind, ConfigAgentRuntime, ConfigLaunchMode, ConfigSessionMode,
+    };
     use std::collections::HashMap;
 
     #[test]
@@ -388,6 +390,7 @@ mod tests {
             container: Some(container),
             session: ConfigSessionMode::default(),
             runtime: ConfigAgentRuntime::default(),
+            launch_mode: ConfigLaunchMode::default(),
             kind: ConfigAgentKind::default(),
             context: None,
             compact_threshold: None,
@@ -442,6 +445,7 @@ mod tests {
             container: None,
             session: ConfigSessionMode::default(),
             runtime: ConfigAgentRuntime::default(),
+            launch_mode: ConfigLaunchMode::default(),
             kind: ConfigAgentKind::default(),
             context: None,
             compact_threshold: None,
@@ -469,6 +473,7 @@ mod tests {
             container: None,
             session: ConfigSessionMode::default(),
             runtime: ConfigAgentRuntime::default(),
+            launch_mode: ConfigLaunchMode::default(),
             kind: ConfigAgentKind::default(),
             context: None,
             compact_threshold: None,
@@ -507,6 +512,7 @@ mod tests {
             container: None,
             session: ConfigSessionMode::default(),
             runtime: ConfigAgentRuntime::default(),
+            launch_mode: ConfigLaunchMode::default(),
             kind: ConfigAgentKind::default(),
             context: None,
             compact_threshold: None,
@@ -534,6 +540,7 @@ mod tests {
             container: None,
             session: ConfigSessionMode::default(),
             runtime: ConfigAgentRuntime::default(),
+            launch_mode: ConfigLaunchMode::default(),
             kind: ConfigAgentKind::default(),
             context: None,
             compact_threshold: None,
@@ -562,6 +569,7 @@ mod tests {
             container: None,
             session: ConfigSessionMode::default(),
             runtime: ConfigAgentRuntime::default(),
+            launch_mode: ConfigLaunchMode::default(),
             kind: ConfigAgentKind::default(),
             context: None,
             compact_threshold: None,
@@ -588,6 +596,7 @@ mod tests {
             container: None,
             session: ConfigSessionMode::default(),
             runtime: ConfigAgentRuntime::default(),
+            launch_mode: ConfigLaunchMode::default(),
             kind: ConfigAgentKind::default(),
             context: None,
             compact_threshold: None,

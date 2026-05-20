@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::{self, ContainerConfig, UserConfig};
 use crate::domain::config_types::{
-    ConfigAgentKind, ConfigAgentRuntime, ConfigContextConfig, ConfigSessionMode,
+    ConfigAgentKind, ConfigAgentRuntime, ConfigContextConfig, ConfigLaunchMode, ConfigSessionMode,
 };
 
 use super::process_builder::{build_command, inject_required_flags};
@@ -46,6 +46,11 @@ pub struct AgentConfig {
     /// Agent runtime protocol: claude (default) or acp.
     #[serde(default)]
     pub runtime: ConfigAgentRuntime,
+    /// Launch mode: subprocess (default) or tmux (#452).
+    /// When `tmux`, deskd starts the agent's Claude REPL inside a detached
+    /// tmux session named `deskd-<agent>` instead of spawning a direct child.
+    #[serde(default)]
+    pub launch_mode: ConfigLaunchMode,
     /// Worker loop kind: executor (default, full lifecycle) or context (lightweight Q&A).
     #[serde(default)]
     pub kind: ConfigAgentKind,
@@ -323,6 +328,7 @@ pub async fn create_or_recover(
         container: def.container.clone(),
         session: ConfigSessionMode::default(),
         runtime: def.runtime.clone(),
+        launch_mode: def.launch_mode.clone(),
         kind: ConfigAgentKind::default(),
         context: user_cfg.and_then(|c| c.context.clone()),
         compact_threshold: None,
@@ -751,6 +757,7 @@ pub async fn spawn_ephemeral(
         container: None,
         session: ConfigSessionMode::default(),
         runtime: ConfigAgentRuntime::default(),
+        launch_mode: ConfigLaunchMode::default(),
         kind: ConfigAgentKind::default(),
         context: None,
         compact_threshold: None,
@@ -810,6 +817,7 @@ created_at: "2024-01-01T00:00:00Z"
             container: None,
             session: ConfigSessionMode::default(),
             runtime: ConfigAgentRuntime::default(),
+            launch_mode: ConfigLaunchMode::default(),
             kind: ConfigAgentKind::default(),
             context: None,
             compact_threshold: None,
@@ -882,6 +890,7 @@ created_at: "2024-01-01T00:00:00Z"
             container: None,
             session: ConfigSessionMode::default(),
             runtime: ConfigAgentRuntime::default(),
+            launch_mode: ConfigLaunchMode::default(),
             kind: ConfigAgentKind::default(),
             context: None,
             compact_threshold: None,

@@ -12,7 +12,7 @@ use crate::domain::task::TaskCriteria;
 
 // Re-export config value types from domain.
 pub use crate::domain::config_types::{
-    ConfigAgentKind, ConfigAgentRuntime, ConfigContextConfig, ConfigSessionMode,
+    ConfigAgentKind, ConfigAgentRuntime, ConfigContextConfig, ConfigLaunchMode, ConfigSessionMode,
 };
 
 // ─── ModelDef / TransitionDef ───────────────────────────────────────────────

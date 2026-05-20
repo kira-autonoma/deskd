@@ -159,6 +159,7 @@ pub async fn spawn_components(
                 container: def.container.clone(),
                 session: sub.session.clone(),
                 runtime: sub.runtime.clone(),
+                launch_mode: sub.launch_mode.clone(),
                 kind: sub.kind.clone(),
                 context: context_cfg,
                 compact_threshold: sub.compact_threshold,

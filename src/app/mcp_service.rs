@@ -1099,6 +1099,7 @@ mod restart_tests {
             container: None,
             session: crate::infra::dto::ConfigSessionMode::Persistent,
             runtime: crate::infra::dto::ConfigAgentRuntime::Claude,
+            launch_mode: crate::infra::dto::ConfigLaunchMode::Subprocess,
             kind: crate::infra::dto::ConfigAgentKind::Executor,
             context: None,
             compact_threshold: None,

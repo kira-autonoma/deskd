@@ -172,6 +172,7 @@ fn mk_agent_state(name: &str, status: &str) -> AgentState {
             container: None,
             session: ConfigSessionMode::default(),
             runtime: ConfigAgentRuntime::default(),
+            launch_mode: Default::default(),
             kind: ConfigAgentKind::default(),
             context: None,
             compact_threshold: Some(0.8),

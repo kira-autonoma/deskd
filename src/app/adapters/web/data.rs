@@ -346,6 +346,7 @@ mod tests {
                 session: ConfigSessionMode::default(),
                 runtime: ConfigAgentRuntime::default(),
                 kind: ConfigAgentKind::default(),
+                launch_mode: Default::default(),
                 context: None,
                 compact_threshold: None,
                 auto_compact_threshold_tokens: None,

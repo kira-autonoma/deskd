@@ -388,6 +388,57 @@ pub enum AgentAction {
         #[arg(long, default_value = "30")]
         timeout: u64,
     },
+    /// Start an agent's Claude REPL (subprocess by default, or tmux with --tmux).
+    ///
+    /// With `--tmux` (or when per-agent yaml sets `launch_mode: tmux`), launches
+    /// the agent's Claude REPL inside a detached tmux session named
+    /// `deskd-<agent>` running
+    /// `claude --dangerously-load-development-channels server:deskd`.
+    /// Logs are captured via `tmux pipe-pane` to `/var/log/deskd/sessions/<agent>.log`
+    /// (or `~/.local/state/deskd/sessions/<agent>.log` when the system path is
+    /// not writable). #452
+    ///
+    /// Examples:
+    ///   deskd agent start dev --tmux
+    ///   deskd agent start dev               # honours `launch_mode:` in deskd.yaml
+    Start {
+        /// Agent name as defined in the per-agent deskd.yaml.
+        name: String,
+        /// Launch in a detached tmux session named `deskd-<name>` instead of
+        /// spawning a direct child. Opt-in; if neither this flag nor
+        /// `launch_mode: tmux` is set in the agent's yaml, this command
+        /// reports that no launcher is configured.
+        #[arg(long, default_value = "false")]
+        tmux: bool,
+        /// Path to the agent's deskd.yaml (only consulted to read
+        /// `launch_mode:`). Defaults to `~/<name>/deskd.yaml` or the running
+        /// serve state.
+        #[arg(long)]
+        config: Option<String>,
+        /// Override the tmux log directory. Defaults to
+        /// `/var/log/deskd/sessions/` with fallback to
+        /// `~/.local/state/deskd/sessions/`.
+        #[arg(long)]
+        log_dir: Option<String>,
+    },
+    /// Stop an agent's Claude REPL.
+    ///
+    /// If the agent is running under tmux (yaml `launch_mode: tmux` or a
+    /// live `deskd-<agent>` session exists), kills the tmux session via
+    /// `tmux kill-session`. Subprocess-launched agents still go through the
+    /// existing supervisor (no change to their behaviour). #452
+    Stop {
+        /// Agent name.
+        name: String,
+        /// Path to the agent's deskd.yaml (consulted for `launch_mode:`).
+        #[arg(long)]
+        config: Option<String>,
+    },
+    /// Manage tmux REPL sessions for agents (#452).
+    Session {
+        #[command(subcommand)]
+        action: AgentSessionAction,
+    },
     /// Update an agent's settings in workspace.yaml.
     ///
     /// Currently supports switching the named container profile referenced
@@ -407,6 +458,28 @@ pub enum AgentAction {
         /// Path to workspace.yaml. Auto-detected from running serve if omitted.
         #[arg(long)]
         config: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AgentSessionAction {
+    /// Print (or install) a systemd user-unit file that manages the tmux
+    /// session for an agent.
+    ///
+    /// By default the unit is printed to stdout. With `--install`, it is
+    /// written to `~/.config/systemd/user/deskd-<agent>.service` and a
+    /// follow-up `systemctl --user enable --now deskd-<agent>.service`
+    /// invocation is printed (NOT executed — operators run it themselves).
+    ///
+    /// Examples:
+    ///   deskd agent session systemd-unit dev
+    ///   deskd agent session systemd-unit dev --install
+    SystemdUnit {
+        /// Agent name (used in the session name `deskd-<agent>`).
+        name: String,
+        /// Write the unit to `~/.config/systemd/user/` instead of printing.
+        #[arg(long, default_value = "false")]
+        install: bool,
     },
 }
 

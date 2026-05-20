@@ -30,6 +30,21 @@ pub enum ConfigAgentRuntime {
     Memory,
 }
 
+/// How the agent process is launched (#452).
+///
+/// `Subprocess` is the historical behaviour — `deskd serve` spawns a child
+/// process and supervises it directly. `Tmux` (opt-in) launches the agent's
+/// Claude REPL inside a detached tmux session named `deskd-<agent>`, so the
+/// session survives operator disconnects and can be `tmux attach`'d for
+/// inspection.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ConfigLaunchMode {
+    #[default]
+    Subprocess,
+    Tmux,
+}
+
 impl From<ConfigSessionMode> for SessionMode {
     fn from(dto: ConfigSessionMode) -> Self {
         match dto {

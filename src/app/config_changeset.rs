@@ -139,6 +139,7 @@ mod tests {
             env: None,
             session: Default::default(),
             runtime: Default::default(),
+            launch_mode: Default::default(),
             kind: Default::default(),
             context: None,
             compact_threshold: None,

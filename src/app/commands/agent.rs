@@ -1,6 +1,6 @@
 //! `deskd agent` subcommand handlers.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::info;
 
 use crate::app::cli::AgentAction;
@@ -38,6 +38,7 @@ pub async fn handle(action: AgentAction) -> Result<()> {
                 container: None,
                 session: crate::domain::config_types::ConfigSessionMode::default(),
                 runtime: crate::domain::config_types::ConfigAgentRuntime::default(),
+                launch_mode: crate::domain::config_types::ConfigLaunchMode::default(),
                 kind: crate::domain::config_types::ConfigAgentKind::default(),
                 context: None,
                 compact_threshold: None,
@@ -141,12 +142,17 @@ pub async fn handle(action: AgentAction) -> Result<()> {
                 }
             }
 
+            // Discover tmux sessions once so we can surface `tmux: deskd-<n>
+            // (attached/detached)` per agent. Missing tmux is fine — empty map
+            // means "no tmux sessions"; subprocess agents are unaffected.
+            let tmux_sessions = crate::app::tmux_launcher::list_tmux_sessions().unwrap_or_default();
+
             if agents.is_empty() {
                 println!("No agents registered");
             } else {
                 println!(
-                    "{:<15} {:<14} {:<8} {:<10} {:<12} MODEL",
-                    "NAME", "STATUS", "TURNS", "COST", "USER"
+                    "{:<15} {:<14} {:<8} {:<10} {:<12} {:<28} MODEL",
+                    "NAME", "STATUS", "TURNS", "COST", "USER", "LAUNCHER"
                 );
                 let thresholds = crate::app::doctor::DoctorThresholds::default();
                 for a in &agents {
@@ -162,13 +168,15 @@ pub async fn handle(action: AgentAction) -> Result<()> {
                     .map(|(v, _, _)| v)
                     .ok();
                     let status_str = format_list_status(verdict.as_ref(), &domain, a);
+                    let launcher = format_launcher_column(a, &tmux_sessions);
                     println!(
-                        "{:<15} {:<14} {:<8} ${:<9.2} {:<12} {}",
+                        "{:<15} {:<14} {:<8} ${:<9.2} {:<12} {:<28} {}",
                         domain.name,
                         status_str,
                         a.total_turns,
                         a.total_cost,
                         a.config.unix_user.as_deref().unwrap_or("-"),
+                        launcher,
                         domain.capabilities.model,
                     );
                 }
@@ -610,6 +618,20 @@ pub async fn handle(action: AgentAction) -> Result<()> {
         } => {
             return restart_agents(name, all, fresh_session, timeout).await;
         }
+        AgentAction::Start {
+            name,
+            tmux,
+            config,
+            log_dir,
+        } => {
+            handle_start(&name, tmux, config.as_deref(), log_dir.as_deref())?;
+        }
+        AgentAction::Stop { name, config } => {
+            handle_stop(&name, config.as_deref())?;
+        }
+        AgentAction::Session { action } => {
+            handle_session(action)?;
+        }
         AgentAction::Spawn {
             name,
             task,
@@ -669,6 +691,224 @@ fn format_list_status(
         crate::domain::agent::AgentStatus::Ready => format!("ready{}", suffix),
         crate::domain::agent::AgentStatus::Busy { .. } => format!("busy{}", suffix),
         crate::domain::agent::AgentStatus::Unhealthy { .. } => "unhealthy".to_string(),
+    }
+}
+
+/// Render the LAUNCHER column for `agent list` — `tmux: deskd-<n> (attached)`
+/// or `subprocess: pid <pid>` (or `-`).
+fn format_launcher_column(
+    state: &agent::AgentState,
+    tmux_sessions: &std::collections::HashMap<String, crate::app::tmux_launcher::TmuxStatus>,
+) -> String {
+    let session = crate::app::tmux_launcher::session_name_for(&state.config.name);
+    if let Some(status) = tmux_sessions.get(&session) {
+        let suffix = if status.attached {
+            "attached"
+        } else {
+            "detached"
+        };
+        return format!("tmux: {} ({})", status.name, suffix);
+    }
+    if state.pid > 0 && std::path::Path::new(&format!("/proc/{}", state.pid)).exists() {
+        return format!("subprocess: pid {}", state.pid);
+    }
+    "-".to_string()
+}
+
+/// Resolve the per-agent deskd.yaml path for the tmux launcher commands.
+///
+/// Order: explicit `--config` > running serve state > `~/<name>/deskd.yaml`.
+fn resolve_agent_yaml(name: &str, explicit: Option<&str>) -> Option<String> {
+    if let Some(p) = explicit {
+        return Some(p.to_string());
+    }
+    if let Some(state) = config::ServeState::load()
+        && let Some(agent) = state.agent(name)
+    {
+        return Some(agent.config_path.clone());
+    }
+    if let Ok(state) = agent::load_state(name) {
+        if let Some(p) = state.config.config_path.clone() {
+            return Some(p);
+        }
+        // Fall back to the standard workspace location.
+        return Some(format!("{}/deskd.yaml", state.config.work_dir));
+    }
+    None
+}
+
+/// Read the agent's `launch_mode:` from its deskd.yaml, if any.
+fn read_launch_mode_from_yaml(yaml_path: &str) -> crate::domain::config_types::ConfigLaunchMode {
+    use crate::domain::config_types::ConfigLaunchMode;
+    let raw = match std::fs::read_to_string(yaml_path) {
+        Ok(s) => s,
+        Err(_) => return ConfigLaunchMode::default(),
+    };
+    // The agent's deskd.yaml is a UserConfig; for portability we only peek at
+    // the top-level `launch_mode:` field via raw YAML.
+    let doc: serde_yaml::Value = match serde_yaml::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return ConfigLaunchMode::default(),
+    };
+    match doc.get("launch_mode").and_then(|v| v.as_str()) {
+        Some("tmux") => ConfigLaunchMode::Tmux,
+        _ => ConfigLaunchMode::default(),
+    }
+}
+
+/// Resolve the agent's home directory (cwd for the tmux session).
+fn resolve_agent_home(name: &str) -> Option<std::path::PathBuf> {
+    if let Ok(state) = agent::load_state(name) {
+        return Some(std::path::PathBuf::from(state.config.work_dir));
+    }
+    if let Some(state) = config::ServeState::load()
+        && let Some(agent) = state.agent(name)
+    {
+        // The state file maps agent → bus_socket; the home is the socket's parent's parent.
+        let bus = std::path::Path::new(&agent.bus_socket);
+        if let Some(deskd_dir) = bus.parent()
+            && let Some(home) = deskd_dir.parent()
+        {
+            return Some(home.to_path_buf());
+        }
+    }
+    // Fall back to `$HOME/<name>` then `/home/<name>`.
+    if let Some(home_root) = std::env::var_os("HOME") {
+        let candidate = std::path::PathBuf::from(home_root).join(name);
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+    }
+    let vps_candidate = std::path::PathBuf::from(format!("/home/{}", name));
+    if vps_candidate.is_dir() {
+        Some(vps_candidate)
+    } else {
+        None
+    }
+}
+
+/// `deskd agent start <name> [--tmux]` handler (#452).
+///
+/// Tmux launch is opt-in. If neither `--tmux` nor `launch_mode: tmux` is set,
+/// this command exits non-zero with a message pointing to `deskd serve` (which
+/// supervises subprocess agents). This is deliberate — we don't silently fall
+/// back to subprocess mode here, since the subprocess path is owned by
+/// `deskd serve`, not this command.
+fn handle_start(
+    name: &str,
+    tmux_flag: bool,
+    config_arg: Option<&str>,
+    log_dir_arg: Option<&str>,
+) -> Result<()> {
+    use crate::app::tmux_launcher::{
+        LaunchTarget, check_tmux_runtime_prereqs, launch_tmux_session, resolve_log_dir,
+    };
+    use crate::domain::config_types::ConfigLaunchMode;
+
+    // Decide whether tmux is the chosen launcher.
+    let yaml_mode = resolve_agent_yaml(name, config_arg)
+        .as_deref()
+        .map(read_launch_mode_from_yaml)
+        .unwrap_or_default();
+    let use_tmux = tmux_flag || yaml_mode == ConfigLaunchMode::Tmux;
+
+    if !use_tmux {
+        anyhow::bail!(
+            "no launcher configured for agent `{}` — pass `--tmux` or set `launch_mode: tmux` in the agent's deskd.yaml. Subprocess agents are supervised by `deskd serve`.",
+            name
+        );
+    }
+
+    let home_dir = resolve_agent_home(name).ok_or_else(|| {
+        anyhow::anyhow!(
+            "could not resolve home directory for agent `{}` — register it with `deskd agent create` first, or run from a workspace where it is defined",
+            name
+        )
+    })?;
+
+    let target = LaunchTarget {
+        name,
+        home_dir: home_dir.as_path(),
+    };
+    check_tmux_runtime_prereqs(&target)?;
+
+    let log_dir_path = match log_dir_arg {
+        Some(p) => std::path::PathBuf::from(p),
+        None => resolve_log_dir()?,
+    };
+
+    let session = launch_tmux_session(&target, &log_dir_path)?;
+    println!(
+        "started tmux session `{}` (home={}, logs={})",
+        session.session_name,
+        home_dir.display(),
+        session.log_path.display()
+    );
+    println!("attach with: tmux attach -t {}", session.session_name);
+    Ok(())
+}
+
+/// `deskd agent stop <name>` handler (#452).
+///
+/// Stops the tmux session for the agent if one exists. Subprocess-launched
+/// agents are not touched here — operators continue to use `deskd serve` /
+/// `deskd agent restart` for those (the issue is explicit that subprocess
+/// behaviour stays unchanged).
+fn handle_stop(name: &str, config_arg: Option<&str>) -> Result<()> {
+    use crate::app::tmux_launcher::{kill_tmux_session, session_name_for, tmux_session_exists};
+
+    let session = session_name_for(name);
+    let yaml_mode = resolve_agent_yaml(name, config_arg)
+        .as_deref()
+        .map(read_launch_mode_from_yaml)
+        .unwrap_or_default();
+    let session_alive = tmux_session_exists(&session).unwrap_or(false);
+
+    if !session_alive && yaml_mode != crate::domain::config_types::ConfigLaunchMode::Tmux {
+        println!(
+            "no tmux session `{}` is running; agent `{}` is not configured for tmux launch — no action",
+            session, name
+        );
+        return Ok(());
+    }
+
+    kill_tmux_session(name)?;
+    println!("stopped tmux session `{}`", session);
+    Ok(())
+}
+
+/// `deskd agent session` dispatcher.
+fn handle_session(action: crate::app::cli::AgentSessionAction) -> Result<()> {
+    use crate::app::cli::AgentSessionAction;
+    use crate::app::tmux_launcher::{render_systemd_unit, systemd_unit_install_path};
+    match action {
+        AgentSessionAction::SystemdUnit { name, install } => {
+            // current_exe() may return a non-canonical path (e.g. through a
+            // worktree symlink); canonicalise so the unit refers to a stable
+            // absolute path.
+            let binary = std::env::current_exe()
+                .and_then(|p| p.canonicalize())
+                .unwrap_or_else(|_| std::path::PathBuf::from("/usr/local/bin/deskd"));
+            let unit = render_systemd_unit(&name, &binary);
+            if install {
+                let path = systemd_unit_install_path(&name)?;
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).with_context(|| {
+                        format!("failed to create systemd user dir {}", parent.display())
+                    })?;
+                }
+                std::fs::write(&path, &unit)
+                    .with_context(|| format!("failed to write {}", path.display()))?;
+                println!("wrote systemd user unit: {}", path.display());
+                println!(
+                    "enable with: systemctl --user daemon-reload && systemctl --user enable --now deskd-{}.service",
+                    name
+                );
+            } else {
+                print!("{}", unit);
+            }
+            Ok(())
+        }
     }
 }
 

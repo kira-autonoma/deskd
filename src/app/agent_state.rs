@@ -691,6 +691,7 @@ mod tests {
             empty_completion_threshold: None,
             empty_completion_restart_min_secs: None,
             state_file: Some(custom.to_string_lossy().to_string()),
+            launch_mode: Default::default(),
         });
 
         write("helper", "# Helper\n\ncontent\n", Some(&cfg))
